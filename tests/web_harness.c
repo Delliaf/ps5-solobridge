@@ -8,11 +8,10 @@
 #include "../solobridge/bridge_logic.h"
 static atomic_int v=68,stop;
 void log_line(const char *fmt,...) {(void)fmt;}
-void control_notify(const char *s){(void)s;}
+int control_test_notification(void){return 1;}
+int control_notification_result(void){return 0;}
 int control_stop_requested(void){return atomic_load(&stop);}
 void control_request_stop(void){atomic_store(&stop,1);}
-void control_pad_trace(int on){(void)on;}
-void control_pad_snapshot(pad_snapshot *p){*p=(pad_snapshot){.stage=12,.connected=1,.buttons=0x404,.last_pressed=4,.reads=2};}
 int control_volume(void){return atomic_load(&v);}
 int control_verified(void){return control_volume();}
 int control_limit(void){return 136;}
@@ -26,6 +25,6 @@ int main(void){
   for(int i=0;i<500&&!web_active();i++)usleep(10000);
   if(!web_active()){web_stop();return 3;}
   puts("ready");fflush(stdout);
-  while(web_active()&&!control_stop_requested())usleep(10000);
+  while(web_active()&&!control_stop_requested()){if(web_snapshot_requested())web_publish(&a);usleep(10000);}
   web_stop();return control_stop_requested()?2:0;
 }

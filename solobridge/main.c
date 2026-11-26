@@ -16,6 +16,7 @@
 #include "log.h"
 #include "probe.h"
 #include "web.h"
+#include "version.h"
 #define DIR "/data/solobridge"
 static volatile sig_atomic_t running=1;
 static void stop_signal(int s) { (void)s; running=0; }
@@ -32,7 +33,9 @@ int main(void) {
     fprintf(stderr,"TTGK: already running or cannot lock instance\n"); return 1;
   }
   if (log_start()<0) { close(lock); return 1; }
-  log_line("TTGK v2 web-recovery: started pid=%d",getpid());
+  log_line("TTGK Audio Bridge v%s: started pid=%d",TTGK_VERSION,getpid());
+  FILE *vf=fopen(DIR "/version.txt","w");
+  if(vf){fprintf(vf,"%s pid=%d\n",TTGK_VERSION,getpid());fclose(vf);}
   if (control_start()<0) { log_line("control worker failed"); log_stop(); close(lock); return 1; }
   if (web_start()<0) log_line("Web panel unavailable; audio continues");
   int probe=probe_start();
@@ -43,7 +46,7 @@ int main(void) {
   solo_t solo; int online=0,result=0,have=0,gate=0,ack=-1;
   double next_open=0,next_stats=now_sec()+30,blocked_since=0,ready_since=0,last_tick=now_sec();
   unsigned epoch=0;
-  double next_web=0;
+
   eng_player player; eng_player_init(&player);
   eng_pacer pace; eng_pace_init(&pace,last_tick);
   uint8_t packet[ENG_BYTES];
@@ -118,9 +121,9 @@ int main(void) {
       eng_reset(&src.ring,&player); next_open=now_sec()+1; last_tick=now_sec();
     }
     now=now_sec();
-    if (web_active() && now>=next_web) {
+    if (web_snapshot_requested()) {
       web_audio s={online,source_active(&src),player.playing,online&&gate,online?solo_volume_raw(&solo):-1,(int)eng_fill(&src.ring),player.delta*1000000/ENG_Q,pace.queued,player.underruns,late_total+(online?pace.late:0),blocked_total+(online?pace.blocked:0),reconnects,atomic_load(&src.dropped)};
-      web_publish(&s); next_web=now+0.25;
+      web_publish(&s);
     }
     if (now>=next_stats) {
       log_line("status usb=%d capture=%d ring=%zu frames target=%u phase_ppm=%d queue_est=%.1f packets underruns=%llu skipped=%llu late=%llu blocked=%llu source_drop=%lu source_overruns=%lu reconnects=%llu",

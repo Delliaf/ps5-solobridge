@@ -3,6 +3,7 @@
 #include "control.h"
 #include "log.h"
 #include "web_page.h"
+#include "version.h"
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -32,7 +33,8 @@
 #define REQMAX 8192
 static atomic_int active,quit;
 static pthread_t worker;
-static int started,listener=-1;
+static int started,listener=-1,wake[2]={-1,-1};
+static atomic_uint snapshot_request,snapshot_done;
 
 static pthread_mutex_t lock=PTHREAD_MUTEX_INITIALIZER;
 static web_audio audio={.hw=-1};
@@ -118,12 +120,15 @@ static int allowed_request(const char *headers,int post) {
   return 1;
 }
 static void status(int fd) {
+  unsigned ticket=atomic_fetch_add(&snapshot_request,1)+1;
+  uint64_t deadline=ms()+120;
+  while(atomic_load(&snapshot_done)!=ticket&&ms()<deadline&&!atomic_load(&quit))usleep(2000);
+  int fresh=atomic_load(&snapshot_done)==ticket;
   web_audio a; pthread_mutex_lock(&lock);a=audio;pthread_mutex_unlock(&lock);
-  pad_snapshot p;control_pad_snapshot(&p);
   char b[2048];
-  int n=snprintf(b,sizeof(b),"{\"usb\":%d,\"capture\":%d,\"playing\":%d,\"gate\":%d,\"hw\":%d,\"desired\":%d,\"verified\":%d,\"limit\":%d,\"online\":%d,\"ring\":%d,\"phase_ppm\":%d,\"queue\":%.2f,\"underruns\":%llu,\"late\":%llu,\"blocked\":%llu,\"reconnects\":%llu,\"source_drop\":%llu,\"pad\":{\"stage\":%d,\"error\":%u,\"handle\":%d,\"user\":%d,\"connected\":%d,\"phase\":%d,\"buttons\":%u,\"last_pressed\":%u,\"changes\":%u,\"reads\":%u,\"age_ms\":%llu}}",
-    a.usb,a.capture,a.playing,a.gate,a.hw,control_volume(),control_verified(),control_limit(),control_online(),a.ring,a.phase,a.queue,
-    (unsigned long long)a.underruns,(unsigned long long)a.late,(unsigned long long)a.blocked,(unsigned long long)a.reconnects,(unsigned long long)a.source_drop,p.stage,(unsigned)p.err,p.handle,p.user,p.connected,p.phase,p.buttons,p.last_pressed,p.changes,p.reads,(unsigned long long)(p.last_ms?ms()-p.last_ms:0));
+  int n=snprintf(b,sizeof(b),"{\"version\":\"%s\",\"pid\":%d,\"fresh\":%d,\"notification_result\":%d,\"usb\":%d,\"capture\":%d,\"playing\":%d,\"gate\":%d,\"hw\":%d,\"desired\":%d,\"verified\":%d,\"limit\":%d,\"online\":%d,\"ring\":%d,\"phase_ppm\":%d,\"queue\":%.2f,\"underruns\":%llu,\"late\":%llu,\"blocked\":%llu,\"reconnects\":%llu,\"source_drop\":%llu}",
+    TTGK_VERSION,getpid(),fresh,control_notification_result(),a.usb,a.capture,a.playing,a.gate,a.hw,control_volume(),control_verified(),control_limit(),control_online(),a.ring,a.phase,a.queue,
+    (unsigned long long)a.underruns,(unsigned long long)a.late,(unsigned long long)a.blocked,(unsigned long long)a.reconnects,(unsigned long long)a.source_drop);
   if(n<0||(size_t)n>=sizeof(b))plain(fd,503,"status unavailable");else response(fd,200,"application/json",b,(size_t)n);
 }
 static void logs(int fd,const char *path,size_t max) {
@@ -165,7 +170,7 @@ static void serve(int fd) {
   if(!strcmp(method,"GET")&&!strcmp(path,"/")){response(fd,200,"text/html; charset=utf-8",web_page,sizeof(web_page)-1);return;}
 
   if(!strcmp(method,"GET")){
-    if(!strcmp(path,"/health"))plain(fd,200,"TTGK Web OK\n");
+    if(!strcmp(path,"/health"))plain(fd,200,"TTGK Web OK v" TTGK_VERSION "\n");
     else if(!strcmp(path,"/api/status"))status(fd);
     else if(!strcmp(path,"/api/log"))logs(fd,ROOT "/log.txt",65536);
     else if(!strcmp(path,"/api/log/full"))logs(fd,ROOT "/log.txt",524288);
@@ -182,11 +187,12 @@ static void serve(int fd) {
     int toggle=!strcmp(path,"/api/volume/toggle");
     if(!control_adjust(!strcmp(path,"/api/volume/up")?4:-4,toggle)){plain(fd,409,"DAC offline");return;}
     plain(fd,200,"requested; wait for readback");
-  } else if(!strcmp(path,"/api/trace/on")||!strcmp(path,"/api/trace/off")){
-    control_pad_trace(!strcmp(path,"/api/trace/on"));plain(fd,200,"OK");
+  } else if(!strcmp(path,"/api/notification/test")){
+    if(control_test_notification())plain(fd,200,"notification queued; check console and logs");
+    else plain(fd,503,"notification worker unavailable");
   } else if(!strcmp(path,"/api/web/off")||!strcmp(path,"/api/web/disable")){
     if(!strcmp(path,"/api/web/disable")&&persist_disable()<0){plain(fd,503,"cannot persist disable");return;}
-    plain(fd,200,"web panel stopped; audio continues");control_pad_trace(0);atomic_store(&quit,1);
+    plain(fd,200,"web panel stopped; audio continues");atomic_store(&quit,1);
   } else if(!strcmp(path,"/api/stop")){
     plain(fd,200,"payload stopping");control_request_stop();atomic_store(&quit,1);
   } else plain(fd,404,"not found");
@@ -225,8 +231,19 @@ static void *run(void *arg) {
       if(listener<0){for(int i=0;i<20&&!atomic_load(&quit);i++)usleep(100000);continue;}
       startup_status("listening (LAN, no key)",port,0);atomic_store(&active,1);
     }
-    /* Same BSD socket/accept path as upstream, no random device, no
-     * notification API, no poll dependency for the listening socket. */
+    /* Idle listener sleeps until a client or explicit shutdown arrives.
+     * If socketpair is unavailable, select has a 1s shutdown timeout. */
+    if(listener<FD_SETSIZE && wake[0]<FD_SETSIZE) {
+      fd_set set; FD_ZERO(&set);FD_SET(listener,&set);
+      int maxfd=listener;
+      if(wake[0]>=0){FD_SET(wake[0],&set);if(wake[0]>maxfd)maxfd=wake[0];}
+      struct timeval tv={.tv_sec=1,.tv_usec=0};
+      int r=select(maxfd+1,&set,NULL,NULL,wake[0]>=0?NULL:&tv);
+      if(atomic_load(&quit))break;
+      if(r==0 || (r<0&&errno==EINTR))continue;
+      if(r<0){int e=errno;startup_status("select failed; retry",port,e);close(listener);listener=-1;atomic_store(&active,0);usleep(250000);continue;}
+      if(!FD_ISSET(listener,&set))continue;
+    }
     struct sockaddr_in peer={0};socklen_t len=sizeof(peer);
     int fd=accept(listener,(struct sockaddr*)&peer,&len);
     if(fd<0) {
@@ -239,21 +256,25 @@ static void *run(void *arg) {
     close(fd);
   }
   if(listener>=0)close(listener);
-  listener=-1;control_pad_trace(0);atomic_store(&active,0);
+  listener=-1;atomic_store(&active,0);
   startup_status("stopped",port,0);
   return NULL;
 }
 int web_start(void) {
   if(access(DISABLE,F_OK)==0){startup_status("disabled by file",PORT,0);return 0;}
   atomic_store(&quit,0);
+  if(socketpair(AF_UNIX,SOCK_STREAM,0,wake)<0){wake[0]=wake[1]=-1;}
+  else if(nonblock(wake[1])<0){close(wake[0]);close(wake[1]);wake[0]=wake[1]=-1;}
   int err=pthread_create(&worker,NULL,run,NULL);
-  if(err){startup_status("thread failed",PORT,err);return -1;}
+  if(err){if(wake[0]>=0){close(wake[0]);close(wake[1]);wake[0]=wake[1]=-1;}startup_status("thread failed",PORT,err);return -1;}
   started=1;return 1;
 }
 int web_active(void){return atomic_load(&active);}
+int web_snapshot_requested(void){return atomic_load(&snapshot_request)!=atomic_load(&snapshot_done);}
 void web_publish(const web_audio *s){
-  if(pthread_mutex_trylock(&lock)==0){audio=*s;pthread_mutex_unlock(&lock);}
+  unsigned ticket=atomic_load(&snapshot_request);
+  if(pthread_mutex_trylock(&lock)==0){audio=*s;atomic_store(&snapshot_done,ticket);pthread_mutex_unlock(&lock);}
 }
 void web_stop(void){
-  if(started){atomic_store(&quit,1);pthread_join(worker,NULL);started=0;}
+  if(started){atomic_store(&quit,1);if(wake[1]>=0){char x=1;send(wake[1],&x,1,0);}pthread_join(worker,NULL);started=0;if(wake[0]>=0){close(wake[0]);close(wake[1]);wake[0]=wake[1]=-1;}}
 }

@@ -1,7 +1,6 @@
 /* GPL-3.0. AVCAP lifecycle and blocking calls stay off the USB writer. */
 #include "source.h"
 #include "capture.h"
-#include "control.h"
 #include "log.h"
 #include "probe.h"
 #include <time.h>
@@ -36,7 +35,7 @@ static void *run(void *arg) {
       if (now<retry) { usleep(20000); continue; }
       int r=loaded?capture_restart():capture_open();
       if (r<0) { atomic_store(&s->fatal,1); log_line("capture: SDK/module init failed"); break; }
-      if (!loaded) { loaded=1; control_enable_pad(); }
+      if (!loaded) loaded=1;
       if (!r) { retry=seconds()+0.5; continue; }
       if (atomic_load(&s->request_generation)!=generation) { inactive(s); continue; }
       atomic_fetch_add(&s->epoch,1); atomic_store(&s->active_generation,generation); active=1; last=seconds();

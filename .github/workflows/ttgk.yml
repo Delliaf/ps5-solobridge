@@ -39,9 +39,14 @@ jobs:
       - uses: actions/checkout@v4
       - run: docker build -t ttgk-sdk .
       - run: docker run --rm -v "$PWD:/work" ttgk-sdk make -C solobridge
-      - run: sha256sum solobridge/solobridge.elf
+      - run: |
+          version=$(sed -n 's/^#define TTGK_VERSION "\(.*\)"/\1/p' solobridge/version.h)
+          test -n "$version"
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+          cp solobridge/solobridge.elf "solobridge/solobridge-v$version.elf"
+          sha256sum "solobridge/solobridge-v$version.elf"
       - uses: actions/upload-artifact@v4
         with:
-          name: ttgk-audio-experimental
-          path: solobridge/solobridge.elf
+          name: ttgk-audio-v${{ env.VERSION }}
+          path: solobridge/solobridge-v*.elf
           if-no-files-found: error

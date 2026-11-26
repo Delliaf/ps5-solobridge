@@ -107,8 +107,7 @@ static void *volume_run(void *arg) {
       /* One post per changed request; periodic timeout is a safety fallback. */
       struct timespec deadline;
       clock_gettime(CLOCK_REALTIME,&deadline);
-      deadline.tv_nsec+=100000000;
-      if (deadline.tv_nsec>=1000000000) { deadline.tv_nsec-=1000000000; deadline.tv_sec++; }
+      deadline.tv_sec+=1;
       if (sem_timedwait(&s->volume_event,&deadline)<0 && errno!=ETIMEDOUT && errno!=EINTR)
         atomic_store(&s->event_ok,0);
     } else usleep(10000);

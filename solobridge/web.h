@@ -8,6 +8,7 @@ typedef struct {
 } web_audio;
 int web_start(void);
 int web_active(void);
+int web_snapshot_requested(void);
 void web_publish(const web_audio *s);
 void web_stop(void);
 #endif

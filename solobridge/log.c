@@ -11,6 +11,7 @@
 #define LIMIT (512*1024L)
 #define COUNT 64u
 static pthread_mutex_t lock=PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t available=PTHREAD_COND_INITIALIZER;
 static pthread_t worker;
 static atomic_int quit,started;
 static atomic_uint dropped;
@@ -30,9 +31,10 @@ static void *run(void *arg) {
   for (;;) {
     entry_t msg; int have=0;
     pthread_mutex_lock(&lock);
+    while(!fill&&!atomic_load(&quit))pthread_cond_wait(&available,&lock);
     if (fill) { msg=queue[head]; head=(head+1)%COUNT; fill--; have=1; }
     pthread_mutex_unlock(&lock);
-    if (!have) { if (atomic_load(&quit)) break; usleep(100000); continue; }
+    if (!have) { if (atomic_load(&quit)) break; continue; }
     if (!fp) fp=open_log();
     if (fp) {
       unsigned lost=atomic_exchange(&dropped,0);
@@ -57,10 +59,10 @@ void log_line(const char *fmt,...) {
   if (fill==COUNT) atomic_fetch_add(&dropped,1);
   else {
     entry_t *e=&queue[(head+fill)%COUNT];
-    e->ts=time(NULL); snprintf(e->text,sizeof(e->text),"%s",msg); fill++;
+    e->ts=time(NULL); snprintf(e->text,sizeof(e->text),"%s",msg); fill++; pthread_cond_signal(&available);
   }
   pthread_mutex_unlock(&lock);
 }
 void log_stop(void) {
-  if (atomic_exchange(&started,0)) { atomic_store(&quit,1); pthread_join(worker,NULL); }
+  if (atomic_exchange(&started,0)) { pthread_mutex_lock(&lock); atomic_store(&quit,1); pthread_cond_signal(&available); pthread_mutex_unlock(&lock); pthread_join(worker,NULL); }
 }
