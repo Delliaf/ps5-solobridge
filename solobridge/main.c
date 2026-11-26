@@ -241,6 +241,8 @@ int main(void) {
     return 1;
   }
   g_log=fopen(LOG_PATH,"a");
+  if (!freopen(LOG_DIR "/diagnostics.log","a",stderr))
+    log_line("Cannot open diagnostics.log");
   log_line("TTGK audio bridge started (pid %d), no network listener",getpid());
   if (control_start()<0) log_line("Control unavailable; using saved/default volume");
 
@@ -270,7 +272,7 @@ int main(void) {
         control_applied(wanted);
         st.solo_reconnects++;
         st.solo_rate = solo.rate;
-        // Misura la profondita' del FIFO USB riempiendolo di silenzio.
+        // Prime only our latency target, not the entire kernel FIFO.
         size_t len = silent_packet(pkt, &solo);
         int depth = 0;
         while (depth < USB_AHEAD && solo_write(&solo, pkt, len) == 1)
@@ -278,7 +280,7 @@ int main(void) {
         st.fifo_depth = depth;
         usb_written = depth;
         usb_t0 = now_sec();      // tutto il FIFO e' ancora da trasmettere
-        log_line("Solo collegata: streaming a %d Hz, FIFO USB %d pacchetti (%.1f ms)",
+        log_line("TTGK connected: streaming at %d Hz, primed %d packets (%.1f ms)",
                  SOLO_RATE, depth, depth * 1000.0 / PKTS_PER_SEC);
       } else {
         next_solo = t + 1.0;
@@ -295,6 +297,7 @@ int main(void) {
           break;
         }
         cap_loaded = 1;
+        control_enable_pad();
       } else {
         r = capture_restart();
         st.cap_restarts++;
@@ -379,7 +382,7 @@ int main(void) {
     }
 
     if (!busy)
-      usleep(250);
+      usleep(solo_ok ? 250 : 100000);
   }
 
   if (solo_ok)
@@ -387,9 +390,9 @@ int main(void) {
   if (cap_loaded)
     capture_close();
   control_stop();
-  close(lfd);
-  log_line("solobridge terminato");
+  log_line("TTGK stopped");
   if (g_log)
     fclose(g_log);
+  close(lfd);
   return result;
 }

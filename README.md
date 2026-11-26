@@ -8,7 +8,7 @@ Fork of [ps5-solobridge](https://github.com/hebiii994/ps5-solobridge), GPL-3.0. 
 
 Hold L1 + R3 alone for at least 500 ms. While both remain held:
 
-- Up / Down: +2 / -2 dB (repeat approximately every 150 ms, sampled at 25 Hz)
+- Up / Down: +2 / -2 dB (repeat approximately every 150–190 ms, sampled at 25 Hz)
 - Left / Right: hardware mute / unmute
 - Release either modifier to disarm.
 
@@ -21,7 +21,8 @@ No HTTP or TCP server. A single-instance file lock prevents duplicate playback. 
 - /data/solobridge/volume: verified persisted volume state. Integer 0..148 maps to -74..0 dB in 0.5 dB steps. Add 256 to request mute. Example: 68 = -40 dB, 108 = -20 dB.
 - /data/solobridge/volume.request: write one integer plus newline to a temporary file and rename it to this name atomically. Consumed within about one second. Works if controller API is denied; use an existing local file-management/FTP payload, if available.
 - /data/solobridge/stop: create an empty file to stop gracefully. SIGINT/SIGTERM also stop the resident bridge.
-- /data/solobridge/log.txt: startup and periodic playback diagnostics. Stdout/stderr record control failures.
+- /data/solobridge/log.txt: startup and periodic playback diagnostics; diagnostics.log: USB/controller failures.
+- /data/solobridge/disable_pad: create before launch to disable experimental controller calls while testing audio and file controls. Remove before next launch to enable.
 
 Do not use the upstream solobridge.ps1 TCP status/stop script with this fork.
 

@@ -10,7 +10,7 @@ endif
 ELF := solobridge.elf
 
 CFLAGS := -Wall -Werror -O2
-LDADD  := -lkernel_sys -lpthread
+LDADD  := -lkernel_sys
 
 SRCS := main.c capture.c solo.c control.c
 

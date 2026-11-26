@@ -96,7 +96,9 @@ int solo_open(solo_t *s,int verbose,int volume) {
   int rate_set=clock_rate(s,1);
   what="alt 2"; if (set_alt(s,2)<0) goto fail;
   what="48000 Hz clock";
-  if ((rate_set<0 && clock_rate(s,1)<0)||clock_rate(s,0)<0) goto fail;
+  if (rate_set<0 || clock_rate(s,0)<0) {
+    if (clock_rate(s,1)<0 || clock_rate(s,0)<0) goto fail;
+  }
   char path[40]; snprintf(path,sizeof(path),"/dev/usb/%d.%d.1",s->bus,s->addr);
   what=path; s->ep_fd=open(path,O_WRONLY|O_NONBLOCK);
   if (s->ep_fd<0) goto fail;
@@ -116,9 +118,10 @@ int solo_write(solo_t *s,const void *pkt,size_t len) {
   return -1;
 }
 void solo_close(solo_t *s) {
+  if (s->ctl_fd>=0 && s->configured) set_mute(s,1);
   if (s->ep_fd>=0) { close(s->ep_fd); s->ep_fd=-1; }
   if (s->ctl_fd>=0) {
-    if (s->configured) { set_mute(s,1); set_alt(s,0); }
+    if (s->configured) set_alt(s,0);
     close(s->ctl_fd); s->ctl_fd=-1;
   }
   s->configured=0;

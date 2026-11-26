@@ -15,7 +15,7 @@
 #define STATE DIR "/volume"
 #define REQUEST DIR "/volume.request"
 #define STOP DIR "/stop"
-static atomic_int desired=TTGK_DEFAULT,applied=-1,quitting=0;
+static atomic_int desired=TTGK_DEFAULT,applied=-1,quitting=0,pad_ready=0;
 static pthread_t worker;
 static int started;
 int sceKernelLoadStartModule(const char *,size_t,const void *,uint32_t,void *,int *);
@@ -48,7 +48,8 @@ static void *resolve(int m,const char *nid) {
   return (void *)(intptr_t)kernel_dynlib_resolve(getpid(),(uint32_t)m,nid);
 }
 static int pad_init(void) {
-  if (load("libSceIpmi")<0 || load("libSceMbus")<0) return -1;
+  /* Capture has already loaded libSceIpmi. */
+  if (load("libSceMbus")<0) return -1;
   int u=load("libSceUserService"),p=load("libScePad");
   if (u<0 || p<0) return -1;
   user_init_fn ui=(user_init_fn)resolve(u,"j3YMu1MVNNo");
@@ -91,14 +92,18 @@ static void notify_volume(int v) {
 }
 static void *control_worker(void *arg) {
   (void)arg;
-  int pad_ok=pad_init()==0;
-  if (!pad_ok) fprintf(stderr,"TTGK: direct DualSense API unavailable; use volume.request\n");
+  int pad_ok=0, pad_attempted=access(DIR "/disable_pad",F_OK)==0;
+  if (pad_attempted) fprintf(stderr,"TTGK: DualSense disabled by file\n");
   int handle=-1,owned=0,user=-1,last=-1,persisted=-1,current;
   if (read_value(STATE,&persisted)<0) persisted=-1;
   uint64_t retry=0,user_check=0,files_at=0,changed=0,notify_at=0;
   hotkey_t h={0}; int released=0;
   while (!atomic_load(&quitting)) {
     uint64_t t=ms();
+    if (!pad_attempted && atomic_load(&pad_ready)) {
+      pad_attempted=1; pad_ok=pad_init()==0;
+      if (!pad_ok) fprintf(stderr,"TTGK: direct DualSense API unavailable; use volume.request\n");
+    }
     if (pad_ok && t>=user_check) {
       user_check=t+1000;
       int new_user=-1; if (get_user(&new_user)<0) new_user=-1;
@@ -107,7 +112,7 @@ static void *control_worker(void *arg) {
         handle=-1; owned=0; user=new_user; retry=0; h=(hotkey_t){0}; released=0;
       }
     }
-    if (pad_ok && handle<0 && user>0 && t>=retry) {
+    if (pad_ok && handle<0 && user!=-1 && user!=0 && t>=retry) {
       retry=t+5000; handle=get_handle(user,0,0);
       if (handle<0) { handle=open_pad(user,0,0,NULL); owned=handle>=0; }
       if (handle<0) fprintf(stderr,"TTGK: pad handle unavailable %#x\n",(unsigned)handle);
@@ -156,6 +161,7 @@ int control_start(void) {
   if (r) { fprintf(stderr,"TTGK: control thread failed (%d)\n",r); return -1; }
   started=1; return 0;
 }
+void control_enable_pad(void) { atomic_store(&pad_ready,1); }
 int control_volume(void) { return atomic_load(&desired); }
 void control_applied(int v) { atomic_store(&applied,v); }
 int control_stop_requested(void) { return atomic_load(&quitting); }
