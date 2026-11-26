@@ -12,7 +12,10 @@
 #include <time.h>
 #include <unistd.h>
 #include <sys/stat.h>
-#define ROOT "/data/solobridge"
+#ifndef PROBE_ROOT
+#define PROBE_ROOT "/data/solobridge"
+#endif
+#define ROOT PROBE_ROOT
 #define OUT ROOT "/tempest"
 #define REQUEST ROOT "/tempest_probe.request"
 #define ENABLE ROOT "/enable_tempest_probe"
@@ -22,6 +25,10 @@ static pthread_t worker;
 static uint8_t *pcm;
 static size_t target,used;
 static char label[32];
+/* Host tests shorten the timeout only, not the sample count. */
+#ifndef PROBE_TIMEOUT_EXTRA
+#define PROBE_TIMEOUT_EXTRA 8
+#endif
 static double secs(void) {
   struct timespec t; clock_gettime(CLOCK_MONOTONIC,&t);
   return t.tv_sec+t.tv_nsec/1e9;
@@ -61,7 +68,7 @@ static int write_wav(void) {
 static void *run(void *arg) {
   (void)arg;
   status("idle; submit one request when ready");
-  double deadline=0;
+  double deadline=0; int timed_out=0;
   while (!atomic_load(&quit)) {
     int s=atomic_load(&state);
     if (s==IDLE) {
@@ -71,7 +78,8 @@ static void *run(void *arg) {
           snprintf(label,sizeof(label),"%s",name);
           target=(size_t)probe_duration(name)*PROBE_RATE;
           used=0; atomic_store(&cancel,0);
-          deadline=secs()+probe_duration(name)+8;
+          deadline=secs()+probe_duration(name)+PROBE_TIMEOUT_EXTRA;
+          timed_out=0;
           /* Publish only after all request fields initialized. */
           atomic_store(&state,ARMED);
           status("armed; waiting for source PCM");
@@ -80,7 +88,8 @@ static void *run(void *arg) {
         unlink(REQUEST ".processing");
       }
     } else if (s==ARMED || s==RECORDING) {
-      if (secs()>deadline) {
+      if (!timed_out && secs()>deadline) {
+        timed_out=1;
         atomic_store(&cancel,1);
         int expected=ARMED;
         atomic_compare_exchange_strong(&state,&expected,FAILED);
@@ -106,7 +115,7 @@ int probe_start(void) {
   if (mkdir(OUT,0700)<0 && access(OUT,W_OK)!=0) return -1;
   pcm=malloc((size_t)PROBE_MAX_SECONDS*PROBE_RATE*4);
   if (!pcm) return -1;
-  atomic_store(&state,IDLE); atomic_store(&quit,0);
+  atomic_store(&state,IDLE); atomic_store(&quit,0); atomic_store(&cancel,0);
   /* A previous request is never executed after a reboot. */
   unlink(REQUEST); unlink(REQUEST ".processing");
   if (pthread_create(&worker,NULL,run,NULL)) { free(pcm); pcm=NULL; return -1; }
