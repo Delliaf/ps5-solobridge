@@ -116,3 +116,7 @@ Ten profiles in final v2.5.0 (quick 1 round, full 2 rounds): profile 9 tests a 1
 ## v2.6.0 focused completion-queue experiment
 
 Based on the full two-round v2.5.0 hardware report (10 profiles). Profiles 9 and 6 passed both startups and steady measurement. Each USB_FS completion produced one additional empty readiness event. FreeBSD 11 `ugen_fs_get_complete` clears `flag_iscomplete` only when dequeue finds no event; v2.6 candidates drain through the empty completion BEFORE resubmitting, at most slots+1 completion ioctls. No new kernel ABI or packet-size change. Profiles 10 and 11 are controlled comparisons with 9 and 6; 12–14 explore 24 frames and two slots with 336-frame startup reserve (only at startup). Benchmark only tests 9,6,10–14, in reverse order on second round. Old profile numbers retained; no default change. Verify actual PS5 improvement and listening quality; queue is not measured A/V delay. Calibration unchanged.
+
+## v2.6.1 short benchmark
+
+Same audio engine and selectable playback profiles as v2.6.0. Both benchmark start endpoints now run exactly one round of profiles 9 (known control), 10 (matched drain experiment), 13 (two slots, larger startup reserve). 8 seconds of stable warmup plus 30 seconds measured per profile, about two minutes when healthy. Startup warnings, queue, throughput and CPU checks retained. No profile is automatically selected. Other profiles are still available manually. Short screening does not replace prolonged gameplay testing.

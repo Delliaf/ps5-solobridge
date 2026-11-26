@@ -101,7 +101,7 @@ int main(void) {
       if(online){control_disconnected(0);source_enable(&src,0);solo_close(&solo);online=0;late_total+=pace.late;blocked_total+=pace.blocked;}
       next_open=now_sec();web_set_economy(1);previous=perf_take(next_open,writes,loops,sleeps);next_perf=next_open+5;rate=(perf_rate){0};perf_fs_base=fs_calls;perf_packets_base=packets;perf_empty_base=empty_wakes;fs_rate=packet_rate=empty_rate=0;log_line("selected playback profile=%u",selected);
     }else if((command==1||command==3)&&test<0){
-      rounds=command==3?1:2;test=0;active_profile=bench_id(0);profile=bench_modes[active_profile];batch=profile.batch;measuring=0;phase_at=now;stable_at=0;
+      rounds=1;test=0;active_profile=bench_id(0);profile=bench_modes[active_profile];batch=profile.batch;measuring=0;phase_at=now;stable_at=0;
       phase_under=player.underruns;phase_skip=player.skipped;phase_drop=atomic_load(&src.dropped);phase_over=atomic_load(&src.overruns);phase_preroll=player.preroll;
       web_bench_begin();web_bench_line("rounds=%u profiles=%zu; warmup=%d measurement=%ds",rounds,BENCH_COUNT,BENCH_WARMUP,BENCH_SECONDS);web_set_economy(1);
       if(online){control_disconnected(0);source_enable(&src,0);solo_close(&solo);online=0;late_total+=pace.late;blocked_total+=pace.blocked;}

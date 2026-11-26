@@ -23,13 +23,14 @@ try:
         return data
     page=req("GET","/",False)
     assert b"TTGK Audio Bridge" in page and b"X-TTGK-Key" not in page
+    assert b"benchQuick" not in page and "Короткий тест".encode() in page
     assert b"TTGK Web OK" in req("GET","/health",False)
     assert b"listening" in req("GET","/api/web/status",False)
     req("POST","/api/volume/128",False,403)
     req("GET","/api/status",False,403,{"Host":"attacker.example"})
     req("POST","/api/volume/128",True,403,{"Origin":"http://attacker.example"})
     s=json.loads(req("GET","/api/status",False))
-    assert s["hw"]==68 and s["version"]=="2.6.0" and s["fresh"]==1 and "pad" not in s
+    assert s["hw"]==68 and s["version"]=="2.6.1" and s["fresh"]==1 and "pad" not in s
     req("POST","/api/volume/108")
     assert json.loads(req("GET","/api/status",False))["desired"]==108
     req("POST","/api/volume/up")

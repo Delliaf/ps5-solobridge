@@ -25,9 +25,9 @@ static const bench_profile bench_modes[]={
 #define BENCH_MODES (sizeof(bench_modes)/sizeof(bench_modes[0]))
 #define BENCH_WARMUP 8
 /* Keep prior profile numbers selectable, retest only useful controls and new candidates. */
-static const unsigned bench_order[]={9,6,10,11,12,13,14};
+static const unsigned bench_order[]={9,10,13};
 #define BENCH_COUNT (sizeof(bench_order)/sizeof(bench_order[0]))
-#define BENCH_SECONDS 45
+#define BENCH_SECONDS 30
 static inline unsigned bench_id(unsigned step){
   unsigned i=step%BENCH_COUNT;
   return bench_order[(step/BENCH_COUNT)%2?BENCH_COUNT-1-i:i];
