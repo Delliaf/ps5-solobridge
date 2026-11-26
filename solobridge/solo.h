@@ -4,14 +4,17 @@
 #include <stdint.h>
 #include <stdatomic.h>
 #include <pthread.h>
+#include "volume_logic.h"
 #define SOLO_RATE 48000
 typedef struct {
   int ctl_fd,ep_fd,bus,addr,channels,subslot,bits,configured;
   uint16_t maxpkt;
   uint32_t rate;
-  int hw_volume,hw_mute,worker_started;
+  hw_volume_state hw;
+  int worker_started,transaction;
   pthread_t volume_thread;
   atomic_int volume_wanted,volume_done,volume_stop,volume_error;
+  atomic_uint_fast64_t volume_busy_ms;
 } solo_t;
 int solo_open(solo_t *s,int verbose,int volume);
 void solo_request_volume(solo_t *s,int volume,int ready);

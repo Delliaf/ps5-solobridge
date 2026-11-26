@@ -62,7 +62,10 @@ int main(void) {
         have=gate=0; ready_since=0;
       }
       int cap=atomic_load(&src.active);
-      if (!cap && player.playing) { eng_reset(&src.ring,&player); have=0; }
+      if (!cap) {
+        if (player.playing || have || eng_fill(&src.ring)) { eng_reset(&src.ring,&player); have=0; }
+        gate=0; ready_since=0;
+      }
       eng_pace_tick(&pace,now_sec());
       int written=0;
       for (int burst=0;burst<96 && eng_pace_need(&pace);burst++) {
@@ -89,9 +92,9 @@ int main(void) {
         if (t-ready_since>=0.004) gate=1;
       } else { ready_since=0; gate=0; }
       solo_request_volume(&solo,control_volume(),gate);
-      if (solo_volume_error(&solo)) { failed=1; volume_failure=1; }
+      if (solo_volume_error(&solo)) { log_line("USB control failed or blocked >500ms"); failed=1; volume_failure=1; }
       int done=solo_volume_done(&solo);
-      if (done>=0 && done!=ack) {
+      if (!volume_failure && done>=0 && done!=ack) {
         ack=done; control_applied(done);
         log_line("volume verified: %.1f dB mute=%d",(done&255)*0.5-74.0,!!(done&TTGK_MUTE));
       }

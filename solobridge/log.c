@@ -15,7 +15,8 @@ static pthread_t worker;
 static atomic_int quit,started;
 static atomic_uint dropped;
 static unsigned head,fill;
-static char queue[COUNT][512];
+typedef struct { time_t ts; char text[512]; } entry_t;
+static entry_t queue[COUNT];
 static FILE *open_log(void) {
   FILE *fp=fopen(PATH,"a");
   if (fp && fseek(fp,0,SEEK_END)==0 && ftell(fp)>=LIMIT) {
@@ -27,16 +28,18 @@ static void *run(void *arg) {
   (void)arg;
   FILE *fp=open_log();
   for (;;) {
-    char msg[512]; int have=0;
+    entry_t msg; int have=0;
     pthread_mutex_lock(&lock);
-    if (fill) { memcpy(msg,queue[head],sizeof(msg)); head=(head+1)%COUNT; fill--; have=1; }
+    if (fill) { msg=queue[head]; head=(head+1)%COUNT; fill--; have=1; }
     pthread_mutex_unlock(&lock);
     if (!have) { if (atomic_load(&quit)) break; usleep(100000); continue; }
     if (!fp) fp=open_log();
     if (fp) {
       unsigned lost=atomic_exchange(&dropped,0);
       if (lost) fprintf(fp,"[logger] dropped %u messages\n",lost);
-      fprintf(fp,"%s\n",msg); fflush(fp);
+      struct tm tm; char ts[32]="";
+      if (localtime_r(&msg.ts,&tm)) strftime(ts,sizeof(ts),"%Y-%m-%d %H:%M:%S",&tm);
+      fprintf(fp,"[%s] %s\n",ts,msg.text); fflush(fp);
       if (ftell(fp)>=LIMIT) { fclose(fp); fp=NULL; }
     }
   }
@@ -53,9 +56,8 @@ void log_line(const char *fmt,...) {
   if (pthread_mutex_trylock(&lock)) { atomic_fetch_add(&dropped,1); return; }
   if (fill==COUNT) atomic_fetch_add(&dropped,1);
   else {
-    time_t t=time(NULL); struct tm tm;
-    char ts[32]=""; if (localtime_r(&t,&tm)) strftime(ts,sizeof(ts),"%Y-%m-%d %H:%M:%S",&tm);
-    snprintf(queue[(head+fill)%COUNT],sizeof(queue[0]),"[%s] %.470s",ts,msg); fill++;
+    entry_t *e=&queue[(head+fill)%COUNT];
+    e->ts=time(NULL); snprintf(e->text,sizeof(e->text),"%s",msg); fill++;
   }
   pthread_mutex_unlock(&lock);
 }

@@ -5,7 +5,7 @@
 typedef struct {
   pthread_t thread;
   atomic_int stop,enable,active,fatal;
-  atomic_uint epoch;
+  atomic_uint epoch,request_generation;
   atomic_ulong overruns,dropped;
   eng_ring ring;
 } source_t;

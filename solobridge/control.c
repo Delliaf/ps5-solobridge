@@ -9,6 +9,9 @@
 #include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <errno.h>
+#include <ctype.h>
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
@@ -28,8 +31,8 @@ static void request_volume(int v) {
     if (atomic_compare_exchange_weak(&desired,&old,n)) return;
   }
 }
-static pthread_t worker;
-static int started;
+static pthread_t worker,pad_worker;
+static int started,pad_started;
 int sceKernelLoadStartModule(const char *,size_t,const void *,uint32_t,void *,int *);
 typedef int (*init_fn)(void);
 typedef int (*user_init_fn)(void *);
@@ -52,9 +55,13 @@ static uint64_t ms(void) {
   return (uint64_t)t.tv_sec*1000+t.tv_nsec/1000000;
 }
 static int load(const char *name) {
-  char path[128]; int res=0;
-  snprintf(path,sizeof(path),"/system/common/lib/%s.sprx",name);
-  return sceKernelLoadStartModule(path,0,NULL,0,NULL,&res);
+  char path[128],base[80]; int res=0; uint32_t h=0;
+  snprintf(base,sizeof(base),"%s.sprx",name);
+  if (kernel_dynlib_handle(getpid(),base,&h)==0 && h) return (int)h;
+  snprintf(path,sizeof(path),"/system/common/lib/%s",base);
+  int r=sceKernelLoadStartModule(path,0,NULL,0,NULL,&res);
+  if (r<0 && kernel_dynlib_handle(getpid(),base,&h)==0 && h) return (int)h;
+  return r;
 }
 static void *resolve(int m,const char *nid) {
   return (void *)(intptr_t)kernel_dynlib_resolve(getpid(),(uint32_t)m,nid);
@@ -79,15 +86,19 @@ static int pad_init(void) {
   return 0;
 }
 static int read_value(const char *path,int *v) {
-  FILE *f=fopen(path,"r"); if (!f) return -1;
-  char line[64],tail; int value=-1;
-  int ok=fgets(line,sizeof(line),f)!=NULL &&
-         sscanf(line,"%d %c",&value,&tail)==1 && volume_valid(value);
-  if (ok && !strchr(line,'\n') && !feof(f)) ok=0;
-  if (ok && fgetc(f)!=EOF) ok=0;
-  fclose(f);
+  FILE *fp=fopen(path,"r"); if (!fp) return -1;
+  char line[64];
+  size_t n=fread(line,1,sizeof(line)-1,fp);
+  int ok=!ferror(fp) && feof(fp) && n>0 && !memchr(line,0,n);
+  fclose(fp);
   if (!ok) return -1;
-  *v=value; return 0;
+  line[n]=0;
+  char *end; errno=0;
+  long value=strtol(line,&end,10);
+  if (errno || end==line || value<0 || value>511) return -1;
+  while (isspace((unsigned char)*end)) end++;
+  if (*end || !volume_valid((int)value)) return -1;
+  *v=(int)value; return 0;
 }
 static int save_value(int v) {
   FILE *f=fopen(STATE ".tmp","w"); if (!f) return -1;
@@ -102,13 +113,12 @@ static void notify_volume(int v) {
   else snprintf(req.message,sizeof(req.message),"TTGK USB Audio: %.1f dB",(v&255)*0.5-74.0);
   sceKernelSendNotificationRequest(0,&req,sizeof(req),0);
 }
-static void *control_worker(void *arg) {
+static void *pad_run(void *arg) {
   (void)arg;
   int pad_ok=0, pad_attempted=access(DIR "/disable_pad",F_OK)==0;
   if (pad_attempted) log_line("TTGK: DualSense disabled by file");
-  int handle=-1,owned=0,user=-1,last=-1,persisted=-1,current;
-  if (read_value(STATE,&persisted)<0) persisted=-1;
-  uint64_t retry=0,user_check=0,files_at=0,changed=0,notify_at=0;
+  int handle=-1,owned=0,user=-1;
+  uint64_t retry=0,user_check=0;
   hotkey_t h={0}; int released=0;
   while (!atomic_load(&quitting)) {
     uint64_t t=ms();
@@ -144,27 +154,41 @@ static void *control_worker(void *arg) {
         if (released && (state&ONLINE)) request_volume(hotkey(&h,b,t,state&511));
       }
     }
+    usleep(40000);
+  }
+  if (handle>=0 && owned) close_pad(handle);
+  return NULL;
+}
+static void *control_worker(void *arg) {
+  (void)arg;
+  int last=-1,persisted=-1,shown=-1,current;
+  if (read_value(STATE,&persisted)<0) persisted=-1;
+  uint64_t changed=0,notify_at=0,files_at=0;
+  while (!atomic_load(&quitting)) {
+    uint64_t t=ms();
     if (t>=files_at) {
-      files_at=t+1000;
+      files_at=t+250;
       if (unlink(STOP)==0) { atomic_store(&quitting,1); break; }
       if (rename(REQUEST,REQUEST ".processing")==0) {
-        if (read_value(REQUEST ".processing",&current)==0) request_volume(current);
-        else log_line("TTGK: invalid volume.request");
+        if (read_value(REQUEST ".processing",&current)==0) {
+          if (atomic_load(&desired)&ONLINE) request_volume(current);
+          else log_line("TTGK: volume.request ignored (DAC disconnected)");
+        } else log_line("TTGK: invalid volume.request");
         unlink(REQUEST ".processing");
       }
     }
     int a=atomic_load(&applied);
-    if (a>=0 && a!=last) {
-      last=a; changed=t;
-      if (t>=notify_at) { notify_volume(a); notify_at=t+600; }
-    }
+    if (a>=0 && a!=last) { last=a; changed=t; }
     if (last>=0 && last!=persisted && t-changed>=1000) {
       if (save_value(last)==0) persisted=last;
-      else changed=t;
+      else { changed=t; log_line("TTGK: cannot save volume"); }
     }
-    usleep(40000);
+    /* Show the last value after a held button, even if it landed in cooldown. */
+    if (last>=0 && shown!=last && t>=notify_at) {
+      notify_volume(last); shown=last; notify_at=t+600;
+    }
+    usleep(100000);
   }
-  if (handle>=0 && owned) close_pad(handle);
   int a=atomic_load(&applied);
   if (a>=0 && a!=persisted) save_value(a);
   return NULL;
@@ -176,7 +200,12 @@ int control_start(void) {
   else atomic_store(&desired,clamp_volume(TTGK_DEFAULT));
   int r=pthread_create(&worker,NULL,control_worker,NULL);
   if (r) { log_line("TTGK: control thread failed (%d)",r); return -1; }
-  started=1; return 0;
+  started=1;
+  if (access(DIR "/disable_pad",F_OK)!=0) {
+    if (!pthread_create(&pad_worker,NULL,pad_run,NULL)) pad_started=1;
+    else log_line("TTGK: pad worker failed; file controls remain available");
+  } else log_line("TTGK: DualSense disabled by file");
+  return 0;
 }
 void control_enable_pad(void) { atomic_store(&pad_ready,1); }
 int control_volume(void) { return atomic_load(&desired)&511; }
@@ -192,4 +221,5 @@ int control_stop_requested(void) { return atomic_load(&quitting); }
 void control_stop(void) {
   atomic_store(&quitting,1);
   if (started) pthread_join(worker,NULL);
+  if (pad_started) pthread_join(pad_worker,NULL);
 }

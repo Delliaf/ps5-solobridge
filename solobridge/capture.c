@@ -108,15 +108,23 @@ fail:
   return 0;
 }
 
+static int load_module(const char *path) {
+  const char *base=strrchr(path,'/'); base=base?base+1:path;
+  uint32_t h=0; int res=0;
+  if (kernel_dynlib_handle(getpid(),base,&h)==0 && h) return (int)h;
+  int r=sceKernelLoadStartModule(path,0,NULL,0,NULL,&res);
+  if (r<0 && kernel_dynlib_handle(getpid(),base,&h)==0 && h) return (int)h;
+  return r;
+}
 int capture_open(void) {
-  int mod, res = 0, r;
+  int mod,r;
 
-  r = sceKernelLoadStartModule(IPMI_PATH, 0, NULL, 0, NULL, &res);
+  r = load_module(IPMI_PATH);
   if (r < 0) {
     log_line("capture: load %s -> %#x", IPMI_PATH, (unsigned)r);
     return -1;
   }
-  mod = sceKernelLoadStartModule(LIB_PATH, 0, NULL, 0, NULL, &res);
+  mod = load_module(LIB_PATH);
   if (mod < 0) {
     log_line("capture: load %s -> %#x", LIB_PATH, (unsigned)mod);
     return -1;

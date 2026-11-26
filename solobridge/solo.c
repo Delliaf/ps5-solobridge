@@ -54,57 +54,68 @@ static int set_mute(solo_t *s,int mute) {
   uint8_t v=(uint8_t)!!mute,got=0xff;
   if (request(s,1,2,1,0,&v,1)<0 || request(s,0,2,1,0,&got,1)<0) return -1;
   if (got!=v) { errno=EIO; return -1; }
-  s->hw_mute=mute;
+  s->hw.mute=mute;
   return 0;
 }
 /* Only the control worker touches the control fd during streaming.
  * Startup/shutdown own it only before/after join. */
+#define HOLD_MUTE 512
+static uint64_t millis(void) {
+  struct timespec t; clock_gettime(CLOCK_MONOTONIC,&t);
+  return (uint64_t)t.tv_sec*1000+t.tv_nsec/1000000;
+}
+static int hw_mute(void *ctx,int mute) { return set_mute(ctx,mute); }
+static int hw_channel(void *ctx,int channel,int value) {
+  solo_t *s=ctx; uint16_t u=(uint16_t)value;
+  uint8_t d[2]={(uint8_t)u,(uint8_t)(u>>8)},got[2]={0};
+  if (request(s,1,2,2,channel,d,2)<0 || request(s,0,2,2,channel,got,2)<0) return -1;
+  if (memcmp(d,got,2)) { errno=EIO; return -1; }
+  return 0;
+}
+static int allow_unmute(void *ctx) {
+  solo_t *s=ctx;
+  return !atomic_load(&s->volume_stop) &&
+    atomic_load(&s->volume_wanted)==s->transaction;
+}
+static const hw_volume_ops ops={hw_mute,hw_channel,allow_unmute};
 static int apply_volume(solo_t *s,int volume) {
   if (!volume_valid(volume)) { errno=EINVAL; return -1; }
-  int mute=!!(volume&TTGK_MUTE),v=volume&255;
-  if (mute && s->hw_mute!=1 && set_mute(s,1)<0) goto fail;
-  if (s->hw_volume!=v) {
-    uint16_t value=(uint16_t)volume_units(v);
-    for (int c=1;c<=2;c++) {
-      uint8_t d[2]={(uint8_t)value,(uint8_t)(value>>8)},got[2]={0};
-      if (request(s,1,2,2,c,d,2)<0 || request(s,0,2,2,c,got,2)<0) goto fail;
-      if (memcmp(d,got,2)) { errno=EIO; goto fail; }
-    }
-    s->hw_volume=v;
-  }
-  if (!mute && s->hw_mute!=0 && set_mute(s,0)<0) goto fail;
-  return 0;
-fail: {
-    int saved=errno;
-    s->hw_volume=-1;
-    set_mute(s,1); errno=saved; return -1;
-  }
+  return hw_volume_apply(&s->hw,&ops,s,volume);
 }
-#define HOLD_MUTE 512
 static void *volume_run(void *arg) {
   solo_t *s=arg; int last=-1;
   while (!atomic_load(&s->volume_stop)) {
     int v=atomic_load(&s->volume_wanted);
     if (v!=last) {
+      s->transaction=v;
       int physical=(v&511)|((v&HOLD_MUTE)?TTGK_MUTE:0);
-      if (apply_volume(s,physical)<0) {
-        log_line("USB: volume control failed errno=%d; closing stream",errno);
-        atomic_store(&s->volume_error,1); break;
+      atomic_store(&s->volume_busy_ms,millis());
+      int r=apply_volume(s,physical);
+      atomic_store(&s->volume_busy_ms,0);
+      if (r<0) {
+        int e=errno;
+        atomic_store(&s->volume_error,1); /* before best-effort mute */
+        log_line("USB: volume control failed errno=%d; closing stream",e);
+        set_mute(s,1); break;
       }
-      last=v; atomic_store(&s->volume_done,v);
+      if (!r) { last=v; atomic_store(&s->volume_done,v); }
     }
     usleep(10000);
   }
   return NULL;
 }
 void solo_request_volume(solo_t *s,int volume,int ready) {
-  atomic_store(&s->volume_wanted,volume|(ready?0:HOLD_MUTE));
+  int v=volume|(ready?0:HOLD_MUTE);
+  if (atomic_load(&s->volume_wanted)!=v) atomic_store(&s->volume_wanted,v);
 }
 int solo_volume_done(solo_t *s) {
   int v=atomic_load(&s->volume_done);
   return v<0 || (v&HOLD_MUTE)?-1:v;
 }
-int solo_volume_error(solo_t *s) { return atomic_load(&s->volume_error); }
+int solo_volume_error(solo_t *s) {
+  uint64_t busy=atomic_load(&s->volume_busy_ms);
+  return atomic_load(&s->volume_error) || (busy && millis()-busy>500);
+}
 static int clock_valid(solo_t *s) {
   /* Clock Source 9 advertises read access to Clock Validity. */
   for (int i=0;i<20;i++) {
@@ -127,9 +138,9 @@ static int clock_rate(solo_t *s,int write) {
 }
 int solo_open(solo_t *s,int verbose,int volume) {
   memset(s,0,sizeof(*s)); s->ctl_fd=s->ep_fd=-1;
-  s->hw_volume=s->hw_mute=-1;
+  s->hw=(hw_volume_state){-1,-1};
   atomic_init(&s->volume_wanted,volume|HOLD_MUTE); atomic_init(&s->volume_done,-1);
-  atomic_init(&s->volume_stop,0); atomic_init(&s->volume_error,0);
+  atomic_init(&s->volume_stop,0); atomic_init(&s->volume_error,0); atomic_init(&s->volume_busy_ms,0);
   s->ctl_fd=find_solo(s);
   if (s->ctl_fd<0) return -1;
   uint8_t buf[4096]={0};
@@ -171,7 +182,7 @@ int solo_write(solo_t *s,const void *pkt,size_t len) {
   return -1;
 }
 void solo_close(solo_t *s) {
-  if (s->worker_started) atomic_store(&s->volume_stop,1);
+  if (s->worker_started) { atomic_store(&s->volume_stop,1); atomic_fetch_or(&s->volume_wanted,HOLD_MUTE); }
   if (s->ep_fd>=0) { close(s->ep_fd); s->ep_fd=-1; }
   if (s->worker_started) { pthread_join(s->volume_thread,NULL); s->worker_started=0; }
   if (s->ctl_fd>=0 && s->configured) set_mute(s,1);
