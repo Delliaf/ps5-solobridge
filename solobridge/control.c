@@ -1,10 +1,11 @@
-/* GPL-3.0. Local controller, persistence and file fallback.
- * API references: PS5 SDK sce_stubs and octet/src/ps5_vpad.c.
- * No injection, privilege changes or synthetic input. */
+/* GPL-3.0. Hardware volume requests, local persistence, version notifications.
+ * Notification layout checked against etaHEN and ps5-payload-dev/elfldr.
+ * No controller polling or system process injection. */
 #include "control.h"
 #include "bridge_logic.h"
 #include "log.h"
 #include "version.h"
+#include "notification.h"
 #include <semaphore.h>
 #include <stddef.h>
 #include <stdatomic.h>
@@ -17,7 +18,10 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
-#define DIR "/data/solobridge"
+#ifndef CONTROL_ROOT
+#define CONTROL_ROOT "/data/solobridge"
+#endif
+#define DIR CONTROL_ROOT
 #define STATE DIR "/volume"
 #define REQUEST DIR "/volume.request"
 #define STOP DIR "/stop"
@@ -39,10 +43,6 @@ static int started;
 static atomic_int notify_started;
 static sem_t notify_event;
 static atomic_int notify_pending,notify_result=INT32_MIN,notify_quit;
-typedef struct { int32_t type,req_id,priority,msg_id,target_id,user_id,unk1,unk2,app_id,error_num,unk3; uint8_t use_icon; char message[1024],uri[1024],extra[1024]; } notify_request;
-_Static_assert(sizeof(notify_request)==3120,"notification ABI");
-_Static_assert(offsetof(notify_request,message)==45,"notification message ABI");
-int sceKernelSendNotificationRequest(int,notify_request *,size_t,int);
 static uint64_t ms(void) {
   struct timespec t; clock_gettime(CLOCK_MONOTONIC,&t);
   return (uint64_t)t.tv_sec*1000+t.tv_nsec/1000000;
@@ -77,6 +77,7 @@ static void *notify_run(void *arg) {
 }
 static int queue_notification(int v) {
   if(!notify_started)return 0;
+  atomic_store(&notify_result,INT32_MIN);
   if(!atomic_exchange(&notify_pending,v+2))sem_post(&notify_event);
   return 1;
 }
@@ -108,12 +109,11 @@ static void *control_worker(void *arg) {
   (void)arg;
   int last=-1,persisted=-1,shown=-1,current;
   if (read_value(STATE,&persisted)<0) persisted=-1;
-  uint64_t changed=0,files_at=0;
+  uint64_t changed=0;
   int notifications=access(DIR "/enable_notifications",F_OK)==0;
   while (!atomic_load(&quitting)) {
     uint64_t t=ms();
-    if (t>=files_at) {
-      files_at=t+1000;
+    {
       if (unlink(STOP)==0) { atomic_store(&quitting,1); break; }
       if (rename(REQUEST,REQUEST ".processing")==0) {
         if (read_value(REQUEST ".processing",&current)==0) {
@@ -133,7 +133,7 @@ static void *control_worker(void *arg) {
       if(shown>=0)queue_notification(last);
       shown=last;
     }
-    usleep(250000);
+    usleep(1000000);
   }
   int a=atomic_load(&applied);
   if (a>=0 && a!=persisted) save_value(a);

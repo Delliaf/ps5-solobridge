@@ -29,6 +29,10 @@ jobs:
           /tmp/ttgk-probe-runtime
           cc -std=gnu11 -Wall -Wextra -Werror -O2 -pthread -fsanitize=undefined,address -fno-omit-frame-pointer -DWEB_ROOT=\"$root\" -DWEB_PORT=19160 tests/web_harness.c solobridge/web.c -o /tmp/ttgk-web
           python3 tests/test_web.py "$root" 19160 /tmp/ttgk-web
+          cc -std=gnu11 -Wall -Wextra -Werror -O2 -pthread -fsanitize=undefined,address -fno-omit-frame-pointer -DCONTROL_ROOT=\"$root\" tests/test_control.c solobridge/control.c -o /tmp/ttgk-control
+          /tmp/ttgk-control
+          python3 -c 'import json,pathlib; s=pathlib.Path("solobridge/web_page.h").read_text(); h="".join(json.loads(l.rstrip(";")) for l in s.splitlines() if l.startswith(chr(34))); pathlib.Path("/tmp/ttgk-ui.js").write_text(h.split("<script>")[1].split("</script>")[0])'
+          node --check /tmp/ttgk-ui.js
       - run: |
           python3 -m venv /tmp/ttgk-analyzer
           /tmp/ttgk-analyzer/bin/pip install numpy

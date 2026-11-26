@@ -67,6 +67,11 @@ try:
     assert p.stdout.readline().strip()=="ready"
     req("POST","/api/stop")
     assert p.wait(timeout=4)==2
-    print("web no-key/CSRF/Host/volume/log/timeout/fallback/disable/stop tests passed")
+    # No incoming connections: shutdown must wake an idle select.
+    p=subprocess.Popen([binary],stdout=subprocess.PIPE,text=True)
+    assert p.stdout.readline().strip()=="ready"
+    p.terminate()
+    assert p.wait(timeout=4)==0
+    print("web no-key/CSRF/Host/volume/log/timeout/fallback/disable/idle-stop tests passed")
 finally:
     if p.poll() is None:p.kill();p.wait()
