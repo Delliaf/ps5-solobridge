@@ -3,18 +3,19 @@
 #include <stdint.h>
 #include <stdio.h>
 #include "perf.h"
-typedef struct {unsigned batch,slots,request,reserve,poll,adaptive,trim,efficient,vector;} bench_profile;
+typedef struct {unsigned batch,slots,request,reserve,poll,adaptive,trim,efficient,vector,prime;} bench_profile;
 /* Indexes are version-local and used by the web UI. No automatic persistence. */
 static const bench_profile bench_modes[]={
-  {0,3,1024,192,2000,0,0,0,0}, /* known safe fallback */
-  {16,2,1024,96,2000,1,1,1,0}, /* previous profile 10 control */
-  {16,3,1024,96,2000,1,1,1,1},
-  {24,2,1024,96,2000,1,1,1,1},
-  {24,3,1024,96,2000,1,1,1,1},
-  {32,2,1024,96,2000,1,1,1,1},
-  {32,3,1024,96,2000,1,1,1,1},
-  {16,3,1024,48,1000,1,1,1,1},
-  {16,2,1024,96,2000,1,1,1,1}
+  {0,3,1024,192,2000,0,0,0,0,0}, /* known safe fallback */
+  {16,2,1024,96,2000,1,1,1,0,0}, /* previous profile 10 control */
+  {16,3,1024,96,2000,1,1,1,1,240},
+  {24,2,1024,96,2000,1,1,1,1,240},
+  {24,3,1024,96,2000,1,1,1,1,240},
+  {32,2,1024,96,2000,1,1,1,1,240},
+  {32,3,1024,96,2000,1,1,1,1,240},
+  {16,3,1024,48,1000,1,1,1,1,240},
+  {16,2,1024,96,2000,1,1,1,1,240},
+  {16,3,1024,96,1000,2,1,1,1,240}
 };
 #define BENCH_MODES (sizeof(bench_modes)/sizeof(bench_modes[0]))
 #define BENCH_WARMUP 8
@@ -48,7 +49,7 @@ static inline int bench_pass(bench_sample a,bench_sample b,unsigned batch){
   double dt=b.cpu.at-a.cpu.at;
   if(dt<24||b.packets<a.packets)return 0;
   double rate=(b.packets-a.packets)/dt;
-  double tol=batch?batch*3/dt+16:16;
+  double tol=batch?batch*3/dt+4:4;
   return rate>=8000-tol&&rate<=8000+tol&&a.underruns==b.underruns&&a.skipped==b.skipped&&a.late==b.late&&a.blocked==b.blocked&&a.drop==b.drop&&a.overruns==b.overruns&&a.reconnects==b.reconnects&&a.epoch==b.epoch;
 }
 #endif

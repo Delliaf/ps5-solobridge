@@ -51,7 +51,7 @@ static inline void eng_discard(eng_ring *r,size_t n) {
 }
 typedef struct {
   int playing,phase,delta,fade;
-  unsigned target,window,min_fill,stable,floor,record;
+  unsigned target,window,min_fill,stable,floor,record,prime_reserve;
   int trim_prime,vector,primed;
   uint64_t preroll;
   uint64_t underruns,skipped,packets,silent;
@@ -117,9 +117,10 @@ static inline eng_frame eng_fade(eng_player *p,eng_frame f) {
 static inline void eng_packet_core(eng_ring *r,eng_player *p,uint8_t out[ENG_BYTES],uint64_t *cursor) {
   uint64_t rd=*cursor;
   size_t fill=(size_t)(atomic_load_explicit(&r->wr,memory_order_acquire)-rd);
-  if (!p->playing && fill>=p->record+p->target+2) {
+  unsigned reserve=(!p->primed&&p->prime_reserve>p->target)?p->prime_reserve:p->target;
+  if (!p->playing && fill>=p->record+reserve+2) {
     /* At startup only, discard already stale, still muted pre-roll. */
-    if(p->trim_prime&&!p->primed){size_t keep=p->record+p->target+2;p->preroll+=fill-keep;rd+=fill-keep;fill=keep;}
+    if(p->trim_prime&&!p->primed){size_t keep=p->record+reserve+2;p->preroll+=fill-keep;rd+=fill-keep;fill=keep;}
     p->playing=p->primed=1; p->phase=p->delta=0; p->window=0; p->min_fill=ENG_RING;
     eng_transition(p);
   }

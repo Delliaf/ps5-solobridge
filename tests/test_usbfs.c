@@ -37,6 +37,6 @@ int main(void){
   assert(rate_bad(0,7972)==1&&rate_bad(1,7972)==2&&rate_bad(2,8000)==0);
   bench_sample a={.cpu={.at=1}},b={.cpu={.at=26},.packets=200000};
   assert(bench_pass(a,b,0)&&bench_pass(a,b,64));
-  b.underruns=1;assert(!bench_pass(a,b,32));b.underruns=0;b.packets=190000;assert(!bench_pass(a,b,32));
+  b.underruns=1;assert(!bench_pass(a,b,32));b.underruns=0;b.packets=199700;assert(!bench_pass(a,b,32));b.packets=190000;assert(!bench_pass(a,b,32));
   puts("USB_FS ABI, completion, partial-open cleanup and benchmark counter tests passed");
 }

@@ -84,10 +84,10 @@ static void low_profile(unsigned record,unsigned batch){
 int main(void) {
   exact_pcm();
   /* Only the first priming in a session may discard stale pre-roll. */
-  eng_init(&r);eng_player pp;eng_player_init(&pp);eng_profile(&pp,1024,96,1);
+  eng_init(&r);eng_player pp;eng_player_init(&pp);eng_profile(&pp,1024,96,1);pp.prime_reserve=240;
   float silence[2048]={0};uint8_t pkt[ENG_BYTES];
   assert(eng_push(&r,silence,1024)==1024&&eng_push(&r,silence,1024)==1024);
-  eng_packet(&r,&pp,pkt);assert(pp.primed&&pp.preroll>0);uint64_t initial=pp.preroll;
+  eng_packet(&r,&pp,pkt);assert(pp.primed&&pp.preroll==2048-1024-240-2);uint64_t initial=pp.preroll;
   eng_discard(&r,eng_fill(&r));eng_packet(&r,&pp,pkt);assert(!pp.playing&&pp.underruns==1);
   assert(eng_push(&r,silence,1024)==1024&&eng_push(&r,silence,1024)==1024);eng_packet(&r,&pp,pkt);
   assert(pp.playing&&pp.preroll==initial);

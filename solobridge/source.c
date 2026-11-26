@@ -86,7 +86,8 @@ static void *run(void *arg) {
       unsigned delay=poll_us;
       if(adaptive&&last_record&&!overrun){
         double remaining=(last_record+last_frames/48000.0-seconds())*1e6-2000;
-        if(remaining>delay)delay=remaining>10000?10000:(unsigned)remaining;
+        unsigned max_sleep=adaptive==2?19000:10000;
+        if(remaining>delay)delay=remaining>max_sleep?max_sleep:(unsigned)remaining;
       }
       usleep(delay);
     }
