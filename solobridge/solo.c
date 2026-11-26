@@ -149,7 +149,7 @@ static int clock_rate(solo_t *s,int write) {
   }
   return 0;
 }
-int solo_open(solo_t *s,int verbose,int volume) {
+int solo_open(solo_t *s,int verbose,int volume,unsigned batch) {
   memset(s,0,sizeof(*s)); s->ctl_fd=s->ep_fd=-1;
   s->hw=(hw_volume_state){-1,-1};
   atomic_init(&s->volume_wanted,volume|HOLD_MUTE); atomic_init(&s->volume_done,-1);
@@ -174,8 +174,9 @@ int solo_open(solo_t *s,int verbose,int volume) {
   }
   what="clock validity"; if (clock_valid(s)<0) goto fail;
   char path[40]; snprintf(path,sizeof(path),"/dev/usb/%d.%d.1",s->bus,s->addr);
-  what=path; s->ep_fd=open(path,O_WRONLY|O_NONBLOCK);
-  if (s->ep_fd<0) goto fail;
+  s->batch=batch;
+  if(batch){what="USB_FS setup";if(fs_setup(&s->fs,s->ctl_fd,batch)<0)goto fail;}
+  else {what=path; s->ep_fd=open(path,O_WRONLY|O_NONBLOCK);if(s->ep_fd<0)goto fail;}
   what="initial hardware volume"; if (apply_volume(s,volume|TTGK_MUTE)<0) goto fail;
   if (sem_init(&s->volume_event,0,0)==0) { s->sem_initialized=1; atomic_store(&s->event_ok,1); }
   what="volume thread"; int err=pthread_create(&s->volume_thread,NULL,volume_run,s);
@@ -205,7 +206,7 @@ void solo_close(solo_t *s) {
   if (s->sem_initialized) { sem_destroy(&s->volume_event); s->sem_initialized=0; }
   if (s->ctl_fd>=0 && s->configured) set_mute(s,1);
   if (s->ctl_fd>=0) {
-    if (s->configured) set_alt(s,0);
+    if(fs_cleanup(&s->fs,s->ctl_fd)==0 && s->configured) set_alt(s,0);
     close(s->ctl_fd); s->ctl_fd=-1;
   }
   s->configured=0;

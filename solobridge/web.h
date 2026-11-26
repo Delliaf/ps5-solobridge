@@ -7,7 +7,12 @@ typedef struct {
   double queue;
   uint64_t underruns,late,blocked,reconnects,source_drop,skipped,writes;
   perf_rate perf;
+  unsigned batch;
 } web_audio;
+int web_bench_command(void);
+void web_bench_begin(void);
+void web_bench_line(const char *fmt,...);
+void web_bench_end(void);
 void web_set_economy(int on);
 int web_get_economy(void);
 int web_start(void);
