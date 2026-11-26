@@ -53,7 +53,8 @@ static close_fn close_pad;
 static read_fn read_pad;
 typedef struct { uint32_t buttons; uint8_t reserved[72],connected,rest[43]; } pad_data;
 _Static_assert(sizeof(pad_data)==120,"pad ABI");
-typedef struct { char reserved[45],message[3075]; } notify_request;
+typedef struct { int32_t type,req_id,priority,msg_id,target_id,user_id,unk1,unk2,app_id,error_num,unk3; uint8_t use_icon; char message[1024],uri[1024],extra[1024]; } notify_request;
+_Static_assert(sizeof(notify_request)==3120,"notification ABI");
 int sceKernelSendNotificationRequest(int,notify_request *,size_t,int);
 static uint64_t ms(void) {
   struct timespec t; clock_gettime(CLOCK_MONOTONIC,&t);
@@ -115,14 +116,16 @@ static int save_value(int v) {
   unlink(STATE ".tmp"); return -1;
 }
 void control_notify(const char *msg) {
-  notify_request req={0}; snprintf(req.message,sizeof(req.message),"%s",msg);
-  sceKernelSendNotificationRequest(0,&req,sizeof(req),0);
+  notify_request req={0}; req.target_id=-1;
+  snprintf(req.message,sizeof(req.message),"%s",msg);
+  int r=sceKernelSendNotificationRequest(0,&req,sizeof(req),0);
+  if(r<0)log_line("notification API returned %#x",(unsigned)r);
 }
 static void notify_volume(int v) {
-  notify_request req={0};
-  if (v&TTGK_MUTE) snprintf(req.message,sizeof(req.message),"TTGK USB Audio: muted");
-  else snprintf(req.message,sizeof(req.message),"TTGK USB Audio: %.1f dB",(v&255)*0.5-74.0);
-  sceKernelSendNotificationRequest(0,&req,sizeof(req),0);
+  char msg[128];
+  if(v&TTGK_MUTE)snprintf(msg,sizeof(msg),"TTGK USB Audio: muted");
+  else snprintf(msg,sizeof(msg),"TTGK USB Audio: %.1f dB",(v&255)*0.5-74.0);
+  control_notify(msg);
 }
 static void *pad_run(void *arg) {
   (void)arg;
@@ -203,6 +206,7 @@ static void *control_worker(void *arg) {
   int last=-1,persisted=-1,shown=-1,current;
   if (read_value(STATE,&persisted)<0) persisted=-1;
   uint64_t changed=0,notify_at=0,files_at=0;
+  int notifications=access(DIR "/enable_notifications",F_OK)==0;
   while (!atomic_load(&quitting)) {
     uint64_t t=ms();
     if (t>=files_at) {
@@ -223,7 +227,7 @@ static void *control_worker(void *arg) {
       else { changed=t; log_line("TTGK: cannot save volume"); }
     }
     /* Show the last value after a held button, even if it landed in cooldown. */
-    if (last>=0 && shown!=last && t>=notify_at) {
+    if (notifications && last>=0 && shown!=last && t>=notify_at) {
       notify_volume(last); shown=last; notify_at=t+600;
     }
     usleep(100000);

@@ -23,6 +23,8 @@ int main(void){
   int r=web_start();if(r<0)return 1;if(r==0)return 0;
   web_audio a={.usb=1,.capture=1,.playing=1,.gate=1,.hw=68,.ring=192};
   web_publish(&a);
+  for(int i=0;i<500&&!web_active();i++)usleep(10000);
+  if(!web_active()){web_stop();return 3;}
   puts("ready");fflush(stdout);
   while(web_active()&&!control_stop_requested())usleep(10000);
   web_stop();return control_stop_requested()?2:0;

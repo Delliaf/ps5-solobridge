@@ -32,14 +32,14 @@ int main(void) {
     fprintf(stderr,"TTGK: already running or cannot lock instance\n"); return 1;
   }
   if (log_start()<0) { close(lock); return 1; }
-  log_line("TTGK v2: started pid=%d",getpid());
+  log_line("TTGK v2 web-recovery: started pid=%d",getpid());
   if (control_start()<0) { log_line("control worker failed"); log_stop(); close(lock); return 1; }
+  if (web_start()<0) log_line("Web panel unavailable; audio continues");
   int probe=probe_start();
   if (probe<0) log_line("Tempest probe init failed; normal bridge remains available");
   else if (probe) log_line("Tempest diagnostic enabled (explicit source capture only)");
   static source_t src;
-  if (source_start(&src)<0) { log_line("capture worker failed"); probe_stop(); control_stop(); log_stop(); close(lock); return 1; }
-  if (web_start()<0) log_line("Web panel unavailable; audio continues");
+  if (source_start(&src)<0) { log_line("capture worker failed"); probe_stop(); web_stop(); control_stop(); log_stop(); close(lock); return 1; }
   solo_t solo; int online=0,result=0,have=0,gate=0,ack=-1;
   double next_open=0,next_stats=now_sec()+30,blocked_since=0,ready_since=0,last_tick=now_sec();
   unsigned epoch=0;

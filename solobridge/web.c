@@ -7,7 +7,7 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
-#include <poll.h>
+#include <sys/select.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdio.h>
@@ -27,38 +27,41 @@
 #endif
 #define ROOT WEB_ROOT
 #define PORT WEB_PORT
-#define KEYFILE ROOT "/web_key"
+#define WEB_STATUS ROOT "/web_status.txt"
 #define DISABLE ROOT "/disable_web"
 #define REQMAX 8192
 static atomic_int active,quit;
 static pthread_t worker;
 static int started,listener=-1;
-static char key[17];
+
 static pthread_mutex_t lock=PTHREAD_MUTEX_INITIALIZER;
 static web_audio audio={.hw=-1};
 static uint64_t ms(void) {
   struct timespec t; clock_gettime(CLOCK_MONOTONIC,&t);
   return (uint64_t)t.tv_sec*1000+t.tv_nsec/1000000;
 }
-static int nonblock(int fd) { int flags=fcntl(fd,F_GETFL,0); return flags<0?-1:fcntl(fd,F_SETFL,flags|O_NONBLOCK); }
+static int nonblock(int fd) { return fcntl(fd,F_SETFL,O_NONBLOCK); }
 static int private_addr(uint32_t a) {
   a=ntohl(a);
   return (a>>24)==10 || (a>>24)==127 || (a>>20)==0xac1 || (a>>16)==0xc0a8 || (a>>16)==0xa9fe;
 }
-static int wait_fd(int fd,short events,uint64_t end) {
+static int wait_fd(int fd,int writing,uint64_t end) {
+  if(fd<0||fd>=FD_SETSIZE) return -1;
   while (!atomic_load(&quit)) {
-    uint64_t t=ms(); if (t>=end) return -1;
-    struct pollfd p={fd,events,0};
-    int r=poll(&p,1,(int)(end-t));
-    if (r>0) return (p.revents&events)?0:-1;
-    if (r==0 || errno!=EINTR) return -1;
+    uint64_t t=ms(); if(t>=end)return -1;
+    unsigned left=(unsigned)(end-t); if(left>100)left=100;
+    struct timeval tv={.tv_sec=0,.tv_usec=(long)left*1000};
+    fd_set set; FD_ZERO(&set); FD_SET(fd,&set);
+    int r=select(fd+1,writing?NULL:&set,writing?&set:NULL,NULL,&tv);
+    if(r>0)return 0;
+    if(r<0&&errno!=EINTR)return -1;
   }
   return -1;
 }
 static int send_all(int fd,const void *data,size_t n,uint64_t end) {
   const char *p=data;
   while(n) {
-    if(wait_fd(fd,POLLOUT,end)<0) return -1;
+    if(wait_fd(fd,1,end)<0) return -1;
     ssize_t w=send(fd,p,n,0);
     if(w<0 && (errno==EAGAIN||errno==EWOULDBLOCK||errno==EINTR)) continue;
     if(w<=0) return -1;
@@ -67,27 +70,52 @@ static int send_all(int fd,const void *data,size_t n,uint64_t end) {
   return 0;
 }
 static void response(int fd,int code,const char *type,const void *body,size_t n) {
-  const char *reason=code==200?"OK":code==400?"Bad Request":code==401?"Unauthorized":code==404?"Not Found":code==409?"Conflict":"Service Unavailable";
+  const char *reason=code==200?"OK":code==400?"Bad Request":code==403?"Forbidden":code==404?"Not Found":code==409?"Conflict":"Service Unavailable";
   char h[768];
   int k=snprintf(h,sizeof(h),"HTTP/1.1 %d %s\r\nContent-Type: %s\r\nContent-Length: %zu\r\nConnection: close\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nX-Frame-Options: DENY\r\nReferrer-Policy: no-referrer\r\nContent-Security-Policy: default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'\r\n\r\n",code,reason,type,n);
   uint64_t end=ms()+1500;
   if(k>0&&(size_t)k<sizeof(h)&&send_all(fd,h,(size_t)k,end)==0) send_all(fd,body,n,end);
 }
 static void plain(int fd,int code,const char *s) { response(fd,code,"text/plain; charset=utf-8",s,strlen(s)); }
-static int authorized(const char *headers) {
-  const char *p=headers; int count=0,ok=0;
-  while (*p) {
-    const char *e=strstr(p,"\r\n"); if(!e||e==p) break;
-    static const char name[]="X-TTGK-Key:";
-    if((size_t)(e-p)>=sizeof(name)-1 && !strncasecmp(p,name,sizeof(name)-1)) {
-      p+=sizeof(name)-1; while(p<e&&(*p==' '||*p=='\t'))p++;
-      const char *last=e;while(last>p&&(last[-1]==' '||last[-1]=='\t'))last--;
-      unsigned diff=0; if(last-p==16) {for(int i=0;i<16;i++)diff|=(unsigned char)p[i]^(unsigned char)key[i];ok=!diff;} else ok=0;
-      count++;
+/* No access key. Restrict browser requests to numeric LAN Host values;
+ * require a non-secret custom header for mutations, and reject foreign Origin.
+ * This is CSRF / DNS-rebinding mitigation, NOT authentication. */
+static int header(const char *p,const char *name,char *out,size_t cap) {
+  size_t nl=strlen(name); int found=0;
+  out[0]=0;
+  while(*p) {
+    const char *e=strstr(p,"\r\n");if(!e||e==p)break;
+    if((size_t)(e-p)>nl && p[nl]==':' && !strncasecmp(p,name,nl)) {
+      if(found++)return -1;
+      const char *v=p+nl+1;while(v<e&&(*v==' '||*v=='\t'))v++;
+      const char *last=e;while(last>v&&(last[-1]==' '||last[-1]=='\t'))last--;
+      size_t n=(size_t)(last-v);if(n>=cap)return -1;
+      memcpy(out,v,n);out[n]=0;
     }
     p=e+2;
   }
-  return count==1&&ok;
+  return found;
+}
+static int allowed_host(const char *host) {
+  char ip[64];size_t n=strcspn(host,":");
+  if(!n||n>=sizeof(ip))return 0;
+  memcpy(ip,host,n);ip[n]=0;
+  if(host[n]) {
+    const char *p=host+n+1;
+    if(!*p)return 0;
+    for(;*p;p++)if(*p<'0'||*p>'9')return 0;
+  }
+  struct in_addr a;
+  return inet_pton(AF_INET,ip,&a)==1&&private_addr(a.s_addr);
+}
+static int allowed_request(const char *headers,int post) {
+  char host[96],origin[128],action[32],expected[128];
+  if(header(headers,"Host",host,sizeof(host))!=1||!allowed_host(host))return 0;
+  int n=header(headers,"Origin",origin,sizeof(origin));
+  if(n<0)return 0;
+  if(n) {snprintf(expected,sizeof(expected),"http://%s",host);if(strcmp(origin,expected))return 0;}
+  if(post&&(header(headers,"X-TTGK-Action",action,sizeof(action))!=1||strcmp(action,"1")))return 0;
+  return 1;
 }
 static void status(int fd) {
   web_audio a; pthread_mutex_lock(&lock);a=audio;pthread_mutex_unlock(&lock);
@@ -121,7 +149,7 @@ static int persist_disable(void) {
 static void serve(int fd) {
   char b[REQMAX+1]; size_t used=0; uint64_t end=ms()+1200;
   while(used<REQMAX) {
-    if(wait_fd(fd,POLLIN,end)<0)return;
+    if(wait_fd(fd,0,end)<0)return;
     ssize_t n=recv(fd,b+used,REQMAX-used,0);
     if(n<0&&(errno==EAGAIN||errno==EWOULDBLOCK||errno==EINTR))continue;
     if(n<=0)return;
@@ -133,13 +161,16 @@ static void serve(int fd) {
   char method[8],path[128],version[16],extra;
   if(sscanf(b,"%7s %127s %15s %c",method,path,version,&extra)!=3 ||
     (strcmp(version,"HTTP/1.1")&&strcmp(version,"HTTP/1.0"))){plain(fd,400,"invalid request");return;}
+  if(!allowed_request(line+2,!strcmp(method,"POST"))){plain(fd,403,"use numeric local IP; POST requires X-TTGK-Action: 1");return;}
   if(!strcmp(method,"GET")&&!strcmp(path,"/")){response(fd,200,"text/html; charset=utf-8",web_page,sizeof(web_page)-1);return;}
-  if(!authorized(line+2)){plain(fd,401,"access key required");return;}
+
   if(!strcmp(method,"GET")){
-    if(!strcmp(path,"/api/status"))status(fd);
+    if(!strcmp(path,"/health"))plain(fd,200,"TTGK Web OK\n");
+    else if(!strcmp(path,"/api/status"))status(fd);
     else if(!strcmp(path,"/api/log"))logs(fd,ROOT "/log.txt",65536);
     else if(!strcmp(path,"/api/log/full"))logs(fd,ROOT "/log.txt",524288);
     else if(!strcmp(path,"/api/log/previous"))logs(fd,ROOT "/log.txt.1",524288);
+    else if(!strcmp(path,"/api/web/status"))logs(fd,WEB_STATUS,4096);
     else plain(fd,404,"not found");
     return;
   }
@@ -160,47 +191,64 @@ static void serve(int fd) {
     plain(fd,200,"payload stopping");control_request_stop();atomic_store(&quit,1);
   } else plain(fd,404,"not found");
 }
+static void startup_status(const char *stage,int port,int error) {
+  char msg[256]; snprintf(msg,sizeof(msg),"Web %s port=%d errno=%d (%s)",stage,port,error,error?strerror(error):"OK");
+  log_line("%s",msg); fprintf(stderr,"%s\n",msg); fflush(stderr);
+  FILE *fp=fopen(WEB_STATUS ".tmp","w");
+  if(fp){int ok=fprintf(fp,"%s\n",msg)>0;if(fclose(fp))ok=0;if(ok)rename(WEB_STATUS ".tmp",WEB_STATUS);else unlink(WEB_STATUS ".tmp");}
+}
+static int open_listener(int port) {
+  int fd=socket(AF_INET,SOCK_STREAM,0);
+  if(fd<0){startup_status("socket failed",port,errno);return -1;}
+  int yes=1;setsockopt(fd,SOL_SOCKET,SO_REUSEADDR,&yes,sizeof(yes));
+  struct sockaddr_in a={0};
+#if defined(__FreeBSD__) || defined(__PROSPERO__)
+  a.sin_len=sizeof(a);
+#endif
+  a.sin_family=AF_INET;a.sin_port=htons(port);a.sin_addr.s_addr=htonl(INADDR_ANY);
+  const char *step="bind failed";
+  if(bind(fd,(struct sockaddr*)&a,sizeof(a))<0)goto fail;
+  step="listen failed";if(listen(fd,4)<0)goto fail;
+  step="nonblock failed";if(nonblock(fd)<0)goto fail;
+  return fd;
+fail: {
+  int e=errno;close(fd);startup_status(step,port,e);errno=e;return -1;
+  }
+}
 static void *run(void *arg) {
   (void)arg;
+  int port=PORT;
   while(!atomic_load(&quit)&&!control_stop_requested()) {
-    struct pollfd p={listener,POLLIN,0};int r=poll(&p,1,250);
-    if(r<=0){if(r<0&&errno!=EINTR)break;continue;}
-    if(!(p.revents&POLLIN))break;
-    struct sockaddr_in peer; socklen_t len=sizeof(peer);
+    if(listener<0) {
+      port=PORT;listener=open_listener(port);
+      if(listener<0&&errno==EADDRINUSE){port=PORT+1;listener=open_listener(port);}
+      if(listener<0){for(int i=0;i<20&&!atomic_load(&quit);i++)usleep(100000);continue;}
+      startup_status("listening (LAN, no key)",port,0);atomic_store(&active,1);
+    }
+    /* Same BSD socket/accept path as upstream, no random device, no
+     * notification API, no poll dependency for the listening socket. */
+    struct sockaddr_in peer={0};socklen_t len=sizeof(peer);
     int fd=accept(listener,(struct sockaddr*)&peer,&len);
-    if(fd<0)continue;
+    if(fd<0) {
+      int e=errno;
+      if(e==EAGAIN||e==EWOULDBLOCK||e==EINTR||e==ECONNABORTED){usleep(50000);continue;}
+      startup_status("accept failed; retry",port,e);close(listener);listener=-1;atomic_store(&active,0);
+      usleep(250000);continue;
+    }
     if(peer.sin_family==AF_INET&&private_addr(peer.sin_addr.s_addr)&&nonblock(fd)==0)serve(fd);
     close(fd);
   }
-  close(listener);listener=-1;control_pad_trace(0);atomic_store(&active,0);
-  log_line("Web panel stopped; audio lifecycle independent");
+  if(listener>=0)close(listener);
+  listener=-1;control_pad_trace(0);atomic_store(&active,0);
+  startup_status("stopped",port,0);
   return NULL;
 }
-static int make_key(void) {
-  /* Fresh per launch; never expose via unauthenticated HTTP or log. */
-  unsigned char bytes[8];int fd=open("/dev/urandom",O_RDONLY);
-  if(fd<0)fd=open("/dev/random",O_RDONLY);
-  if(fd<0)return -1;
-  size_t n=0;while(n<sizeof(bytes)){ssize_t r=read(fd,bytes+n,sizeof(bytes)-n);if(r<0&&errno==EINTR)continue;if(r<=0){close(fd);return -1;}n+=(size_t)r;}close(fd);
-  for(unsigned i=0;i<sizeof(bytes);i++)snprintf(key+2*i,3,"%02x",bytes[i]);
-  FILE *fp=fopen(KEYFILE ".tmp","w");if(!fp)return -1;
-  int ok=fprintf(fp,"%s\n",key)>0;if(fclose(fp))ok=0;
-  if(!ok||rename(KEYFILE ".tmp",KEYFILE)<0){unlink(KEYFILE ".tmp");return -1;}
-  return 0;
-}
 int web_start(void) {
-  if(access(DISABLE,F_OK)==0)return 0;
-  if(make_key()<0)return -1;
-  listener=socket(AF_INET,SOCK_STREAM,0);if(listener<0)return -1;
-  int yes=1;setsockopt(listener,SOL_SOCKET,SO_REUSEADDR,&yes,sizeof(yes));
-  struct sockaddr_in a={0};a.sin_family=AF_INET;a.sin_port=htons(PORT);a.sin_addr.s_addr=htonl(INADDR_ANY);
-  if(nonblock(listener)<0||bind(listener,(struct sockaddr*)&a,sizeof(a))<0||listen(listener,4)<0){close(listener);listener=-1;return -1;}
-  atomic_store(&quit,0);atomic_store(&active,1);
-  if(pthread_create(&worker,NULL,run,NULL)){atomic_store(&active,0);close(listener);listener=-1;return -1;}
-  started=1;
-  char msg[128];snprintf(msg,sizeof(msg),"TTGK Web :%d | Key: %s",PORT,key);
-  control_notify(msg);log_line("Web panel started on port %d (private IPv4, key required)",PORT);
-  return 1;
+  if(access(DISABLE,F_OK)==0){startup_status("disabled by file",PORT,0);return 0;}
+  atomic_store(&quit,0);
+  int err=pthread_create(&worker,NULL,run,NULL);
+  if(err){startup_status("thread failed",PORT,err);return -1;}
+  started=1;return 1;
 }
 int web_active(void){return atomic_load(&active);}
 void web_publish(const web_audio *s){
