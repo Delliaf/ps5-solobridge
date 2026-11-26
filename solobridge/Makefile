@@ -10,13 +10,13 @@ endif
 ELF := solobridge.elf
 
 CFLAGS := -Wall -Werror -O2
-LDADD  := -lkernel_sys
+LDADD  := -lkernel_sys -lpthread
 
-SRCS := main.c capture.c solo.c
+SRCS := main.c capture.c solo.c control.c
 
 all: $(ELF)
 
-$(ELF): $(SRCS) capture.h solo.h
+$(ELF): $(SRCS) capture.h solo.h control.h bridge_logic.h
 	$(CC) $(CFLAGS) -o $@ $(SRCS) $(LDADD)
 
 clean:

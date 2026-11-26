@@ -1,116 +1,57 @@
-# ps5-solobridge
+# TTGK Audio Bridge for PS5 (experimental)
 
-Play the PS5's audio (games **and** system/menu sounds) on a **Focusrite Scarlett Solo
-3rd gen** connected to the console's USB port, on a jailbroken PS5.
+Fork of [ps5-solobridge](https://github.com/hebiii994/ps5-solobridge), GPL-3.0. Target: TTGK Audio 3302:33c0, UAC2 high-speed USB, synchronous stereo 48 kHz / packed 24-bit PCM. The resident bridge no longer targets Scarlett Solo; upstream diagnostic utilities are retained.
 
-The PS5 only accepts USB Audio Class 1 devices: the Scarlett Solo is UAC2-only, so the
-console ignores it and only offers HDMI output. `solobridge` is a resident payload that
-drives the Solo directly through FreeBSD's `/dev/ugen*` interface and feeds it the
-console mix captured from the system capture service.
+**Not yet tested on a PS5.** Upstream capture worked on 13.60; 13.00 is the intended test platform, not a confirmed compatibility claim. HDMI still carries sound. Tempest and the PS5 headphone slider are not integrated.
 
-Tested on **firmware 13.60** with a Scarlett Solo 3rd gen (`1235:8211`).
+## Controls
 
-## Features
+Hold L1 + R3 alone for at least 500 ms. While both remain held:
 
-- Game audio and system sounds (menu, notifications), also while in game
-- Low latency: about 16-40 ms added by solobridge
-- Resident: survives unplugging/replugging the Solo and the end of capture sessions
-  (e.g. closing a game)
-- Single instance, TCP control port (`status`, `stop`), log file
-- Audio keeps playing on HDMI too: the capture is a copy of the mix
+- Up / Down: +2 / -2 dB (repeat approximately every 150 ms, sampled at 25 Hz)
+- Left / Right: hardware mute / unmute
+- Release either modifier to disarm.
 
-## Install
+Direct read-only DualSense API is experimental and may be denied to a resident payload, especially during a game. No system process injection, privilege changes, controller emulation or input suppression. The game may receive the same buttons. The payload logs controller API failures and continues audio. Notifications are rate-limited.
 
-Build it (see below) or take `solobridge.elf` from the
-[releases](https://github.com/hebiii994/ps5-solobridge/releases), then either:
+## Local fallback (no listener)
 
-- send it to the ELF loader (port 9021) with any payload sender, or
-- copy it to `/data/pldmgr/payloads/local/solobridge/` for Payload Manager
-  (the `installer` payload does this for you, `autoload` adds it to autoload).
+No HTTP or TCP server. A single-instance file lock prevents duplicate playback. Default volume -40 dB; startup verifies hardware mute, writes and reads back both volume channels, then applies the desired mute state. **Keep headphones off your ears on the first test** and verify volume independently.
 
-Connect the Solo to a PS5 USB port. Sending the payload again while it is running
-prints the status of the running instance instead of starting a second one.
+- /data/solobridge/volume: verified persisted volume state. Integer 0..148 maps to -74..0 dB in 0.5 dB steps. Add 256 to request mute. Example: 68 = -40 dB, 108 = -20 dB.
+- /data/solobridge/volume.request: write one integer plus newline to a temporary file and rename it to this name atomically. Consumed within about one second. Works if controller API is denied; use an existing local file-management/FTP payload, if available.
+- /data/solobridge/stop: create an empty file to stop gracefully. SIGINT/SIGTERM also stop the resident bridge.
+- /data/solobridge/log.txt: startup and periodic playback diagnostics. Stdout/stderr record control failures.
 
-```powershell
-.\solobridge.ps1 status   # status and statistics
-.\solobridge.ps1 stop     # stop
-```
+Do not use the upstream solobridge.ps1 TCP status/stop script with this fork.
 
-Log: `/data/solobridge/log.txt`.
+## Build and first test
 
-## How it works
+With the upstream Docker build environment (Ubuntu 24.04, PS5 Payload SDK):
 
-**Capture.** `libSceAvcap2` is the client of `av_capture_manager`, the system service
-behind recording, broadcasting and Remote Play. Opened with Remote Play's audio source
-it returns the full mix (game + system sounds) as 48 kHz stereo float32, in records of
-1024 frames. This part comes from
-[FGG-PlayPods](https://github.com/FGGstore/FGG-PlayPods) (GPL-3.0), which streams the
-same mix to Bluetooth headsets.
+    docker build -t ps5sdk .
+    .\\build.ps1 solobridge
 
-**USB output.** The Solo is a UAC2 device: clock source entity, a streaming interface
-with a synchronous isochronous OUT endpoint, 2 channels, 24 bit in 4-byte subslots.
-solobridge selects alternate setting 1, sets the clock to 48 kHz with a class `SET_CUR`
-request and writes one packet per 125 us microframe (6 frames) to the endpoint node
-`/dev/usb/BUS.ADDR.EP`. On ugen each `write()` on an isochronous endpoint becomes one
-packet.
+Or make -C solobridge PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk.
+Send solobridge/solobridge.elf to an already-running ELF loader (9021). Do not enable autoload until manual testing succeeds. Upstream installer/autoload remain optional; rebuild installer after the new ELF is built.
 
-**Latency.** The kernel FIFO of the endpoint accepts ~800 packets (100 ms). solobridge
-keeps it almost empty (~6 ms ahead), estimating consumption from the clock. The ring
-buffer is regulated on its minimum level (just before each 1024-frame capture record),
-dropping or repeating at most one frame every 8 ms (0.26%, no audible pitch change) to
-absorb clock drift. A large excess, like the backlog the capture service hands over
-when a session starts, is skipped at once instead of being played back faster.
+Host-independent tests:
 
-## Repository layout
+    cc -std=c11 -Wall -Wextra -Werror -O2 tests/test_logic.c -o /tmp/ttgk-tests
+    /tmp/ttgk-tests
 
-| Folder | What it does |
-|---|---|
-| `solobridge` | The resident payload |
-| `installer` | Installs `solobridge.elf` (embedded) in Payload Manager as a local payload |
-| `autoload` | Adds `local/solobridge` to `/data/pldmgr/autoload.txt` (with backup, no duplicates) |
-| `usbprobe` | Lists `/dev/ugen*` devices and decodes their descriptors (UAC1/UAC2) |
-| `solotone` | Plays a 440 Hz test tone on the Solo: the minimal UAC2 streaming example |
-| `hello` | Notification sample to check the build/send chain |
-| `lsdir` | Lists `/data/pldmgr` showing small `.txt` / `meta.json` files |
+Test matrix on firmware 13.00:
+1. Start without DAC; verify hotplug.
+2. Connect TTGK at high speed. Check sample-rate readback, both channels, quiet default and no clipping.
+3. Test hardware volume using volume.request before testing DualSense.
+4. Test game/menu capture, transitions, pad reconnect, sign-out/in and L1+R3 chords in a game; note conflicts.
+5. Check packet underruns, delays and hardware control latency. Control ioctls can block and must be measured on hardware.
+6. Disconnect/reconnect DAC, verify persisted volume, stop and restart. Only then enable autoload.
 
-Code comments are in Italian.
+Known TTGK USB topology: AudioControl interface 0, playback interface 1 alt 2, Clock Source 9, Feature Unit 2 (master mute; per-channel volume), endpoint 0x01 with bInterval=1 and 288-byte max packet at high speed. The bridge validates the observed layout and sends 36-byte microframes. Full-speed and unrelated devices are rejected. The DAC HID report descriptor and physical buttons have not been verified.
 
-## Build (Windows + Docker)
+Upstream ring-buffer/drift logic retained, with bounded capture/USB work, reset on reconnect/session loss, corrected full-scale PCM conversion and removal of blocking TCP listener. No software gain adjustment.
 
-The build runs in a Docker image with Ubuntu, clang-18 and
-[ps5-payload-sdk](https://github.com/ps5-payload-dev/sdk).
+Controller ABI references: https://github.com/sub0x00001/octet and https://github.com/blackbearreloaded/ps5-native-gamepad-input-research.
 
-```powershell
-docker build -t ps5sdk .
-.\build.ps1 solobridge                 # -> solobridge\solobridge.elf
-.\send.ps1 solobridge\solobridge.elf   # send to 192.168.88.2:9021, prints stdout
-```
-
-`send.ps1` takes `-PS5Host` and `-Port`; `build.ps1 <folder> clean` cleans.
-On Linux/macOS just `export PS5_PAYLOAD_SDK=/opt/ps5-payload-sdk` and run `make` in a
-folder. `installer` embeds `../solobridge/solobridge.elf`: rebuild it after changing
-solobridge.
-
-## Notes from testing (FW 13.60)
-
-- Payloads run with `uid=1`; `/dev/ugen*` and `/dev/usb/*` are accessible.
-- `USB_GET_DEVICEINFO` is not supported (errno 25) and root hubs `ugenX.1` cannot be
-  opened (errno 6): `USB_GET_DEVICE_DESC` / `USB_GET_FULL_DESC` work.
-- Before solobridge the Solo reports a 0 Hz sample rate: no system driver touches it.
-- Sockets returned by `accept()` inherit `O_NONBLOCK` from the listener (FreeBSD).
-- Docker Desktop on Windows may refuse to start with "listening on unix://...: The file
-  cannot be accessed by the system" after a forced quit (stale AF_UNIX socket files).
-  Quit Docker and rename the folder named in the error, e.g.
-  `Rename-Item "$env:LOCALAPPDATA\Docker\run" run.stale`.
-
-## Other UAC2 devices
-
-Only the Solo's VID/PID is matched (`solobridge/solo.c`), but the descriptor parsing is
-generic. Other class-compliant UAC2 interfaces with a synchronous or adaptive OUT
-endpoint may work by changing `SOLO_VID`/`SOLO_PID`; devices with an asynchronous
-endpoint and a feedback endpoint would need feedback handling. Untested.
-
-## License
-
-GPL-3.0 (see `LICENSE`). The capture code is derived from FGG-PlayPods (GPL-3.0),
-see `solobridge/NOTICE.md`.
+GPL-3.0; see LICENSE and solobridge/NOTICE.md.

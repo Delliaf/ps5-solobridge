@@ -1,17 +1,7 @@
-// solobridge: payload residente che porta l'audio della PS5 (giochi + suoni
-// di sistema, catturati da av_capture_manager) sulla Scarlett Solo via USB.
-//
-// - Una sola istanza: la seconda copia inviata mostra lo stato ed esce.
-// - Controllo via TCP sulla porta CTRL_PORT: "status" oppure "stop".
-// - Sopravvive a Solo scollegata/ricollegata e alla fine delle sessioni di
-//   cattura (es. uscita da un gioco).
-// - Log in /data/solobridge/log.txt
-
+// TTGK audio bridge. GPL-3.0; based on ps5-solobridge.
 #include <sys/types.h>
-#include <sys/socket.h>
 #include <sys/stat.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
+#include <sys/file.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
@@ -24,8 +14,9 @@
 
 #include "capture.h"
 #include "solo.h"
+#include "control.h"
+#include "bridge_logic.h"
 
-#define CTRL_PORT   9160
 #define LOG_DIR     "/data/solobridge"
 #define LOG_PATH    LOG_DIR "/log.txt"
 
@@ -74,7 +65,9 @@ static struct {
 } drift = { (size_t)-1, 0, 0, 0 };
 
 static FILE *g_log;
-static int g_running = 1;
+static volatile sig_atomic_t g_running = 1;
+static void stop_signal(int sig) { (void)sig; g_running=0; }
+static void reset_ring(void) { g_head=g_fill=0; drift.win_min=(size_t)-1; drift.win_count=0; drift.pending_drop=drift.pending_dup=0; }
 
 // --- log -------------------------------------------------------------------
 
@@ -130,10 +123,7 @@ static frame_t ring_pop(void) {
 // --- conversione -----------------------------------------------------------
 
 static void put_sample(uint8_t **p, float v, int subslot) {
-  if (v > 1.0f) v = 1.0f;
-  if (v < -1.0f) v = -1.0f;
-  // PCM giustificato a sinistra nello slot, little-endian
-  uint32_t s = (uint32_t)(int32_t)(v * 2147483647.0f);
+  uint32_t s = pcm_word(v);
   if (subslot < 4)
     s >>= (4 - subslot) * 8;
   for (int b = 0; b < subslot; b++)
@@ -218,48 +208,6 @@ static size_t build_packet(uint8_t *pkt, const solo_t *s, int *playing) {
   return p - pkt;
 }
 
-// --- controllo TCP ---------------------------------------------------------
-
-static int ctrl_listen(void) {
-  int fd = socket(AF_INET, SOCK_STREAM, 0);
-  if (fd < 0)
-    return -1;
-  int one = 1;
-  setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
-  struct sockaddr_in sa = {0};
-  sa.sin_family = AF_INET;
-  sa.sin_port = htons(CTRL_PORT);
-  sa.sin_addr.s_addr = htonl(INADDR_ANY);
-  if (bind(fd, (struct sockaddr *)&sa, sizeof(sa)) != 0 || listen(fd, 4) != 0) {
-    close(fd);
-    return -1;
-  }
-  fcntl(fd, F_SETFL, O_NONBLOCK);
-  return fd;
-}
-
-// Seconda istanza: chiede lo stato a quella gia' attiva e lo stampa.
-static void ask_running_instance(void) {
-  int fd = socket(AF_INET, SOCK_STREAM, 0);
-  struct sockaddr_in sa = {0};
-  sa.sin_family = AF_INET;
-  sa.sin_port = htons(CTRL_PORT);
-  sa.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-  if (fd >= 0 && connect(fd, (struct sockaddr *)&sa, sizeof(sa)) == 0) {
-    char buf[1024];
-    write(fd, "status\n", 7);
-    ssize_t n = read(fd, buf, sizeof(buf) - 1);
-    if (n > 0) {
-      buf[n] = 0;
-      printf("solobridge e' gia' attivo:\n%s", buf);
-    }
-  } else {
-    printf("porta %d occupata ma nessuna risposta\n", CTRL_PORT);
-  }
-  if (fd >= 0)
-    close(fd);
-}
-
 static void status_text(char *out, size_t size, int solo_ok, int cap_ok) {
   double ring_ms = g_fill * 1000.0 / SOLO_RATE;
   double usb_ms = st.usb_queued * 1000.0 / PKTS_PER_SEC;
@@ -277,42 +225,24 @@ static void status_text(char *out, size_t size, int solo_ok, int cap_ok) {
            st.fifo_depth, st.solo_reconnects, st.cap_restarts, capture_overruns());
 }
 
-static void ctrl_poll(int lfd, int solo_ok, int cap_ok) {
-  int c = accept(lfd, NULL, NULL);
-  if (c < 0)
-    return;
-  // su FreeBSD il socket accettato eredita O_NONBLOCK dal listener
-  fcntl(c, F_SETFL, fcntl(c, F_GETFL) & ~O_NONBLOCK);
-  struct timeval tv = { .tv_sec = 1 };
-  setsockopt(c, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-  char cmd[64] = {0};
-  ssize_t n = read(c, cmd, sizeof(cmd) - 1);
-  char reply[512];
-  if (n > 0 && strncmp(cmd, "stop", 4) == 0) {
-    snprintf(reply, sizeof(reply), "stop richiesto\n");
-    g_running = 0;
-    log_line("stop richiesto via TCP");
-  } else {
-    status_text(reply, sizeof(reply), solo_ok, cap_ok);
-  }
-  write(c, reply, strlen(reply));
-  close(c);
-}
-
 // --- main ------------------------------------------------------------------
 
 int main(void) {
   signal(SIGPIPE, SIG_IGN);
 
-  int lfd = ctrl_listen();
-  if (lfd < 0) {
-    ask_running_instance();
-    return 0;
+  signal(SIGTERM, stop_signal);
+  signal(SIGINT, stop_signal);
+  umask(0077);
+  mkdir(LOG_DIR, 0700);
+  int lfd=open(LOG_DIR "/instance.lock",O_CREAT|O_RDWR,0600);
+  if (lfd<0 || flock(lfd,LOCK_EX|LOCK_NB)<0) {
+    if (lfd>=0) close(lfd);
+    fprintf(stderr,"TTGK: already running or cannot lock instance\n");
+    return 1;
   }
-
-  mkdir(LOG_DIR, 0777);
-  g_log = fopen(LOG_PATH, "a");
-  log_line("solobridge avviato (pid %d), controllo su porta %d", getpid(), CTRL_PORT);
+  g_log=fopen(LOG_PATH,"a");
+  log_line("TTGK audio bridge started (pid %d), no network listener",getpid());
+  if (control_start()<0) log_line("Control unavailable; using saved/default volume");
 
   solo_t solo;
   int solo_ok = 0, cap_ok = 0, cap_loaded = 0, playing = 0;
@@ -322,24 +252,28 @@ int main(void) {
   size_t pkt_len = 0;          // pacchetto pronto ma non ancora accettato
   double usb_t0 = 0;           // stima: pacchetti consumati = (t - usb_t0) * 8000
   long usb_written = 0;
+  int volume_applied=-1, result=0;
 
-  while (g_running) {
+  while (g_running && !control_stop_requested()) {
     double t = now_sec();
     int busy = 0;
 
-    ctrl_poll(lfd, solo_ok, cap_ok);
+    int wanted=control_volume();
 
     if (!solo_ok && t >= next_solo) {
-      if (solo_open(&solo, 1) == 0) {
+      if (solo_open(&solo, 1, wanted) == 0) {
         solo_ok = 1;
         playing = 0;
         pkt_len = 0;
+        reset_ring();
+        volume_applied=wanted;
+        control_applied(wanted);
         st.solo_reconnects++;
         st.solo_rate = solo.rate;
         // Misura la profondita' del FIFO USB riempiendolo di silenzio.
         size_t len = silent_packet(pkt, &solo);
         int depth = 0;
-        while (depth < 100000 && solo_write(&solo, pkt, len) == 1)
+        while (depth < USB_AHEAD && solo_write(&solo, pkt, len) == 1)
           depth++;
         st.fifo_depth = depth;
         usb_written = depth;
@@ -351,12 +285,13 @@ int main(void) {
       }
     }
 
-    if (!cap_ok && t >= next_cap) {
+    if (solo_ok && !cap_ok && t >= next_cap) {
       int r;
       if (!cap_loaded) {
         r = capture_open();
         if (r < 0) {
           log_line("cattura non disponibile: librerie non caricabili, esco");
+          result=1;
           break;
         }
         cap_loaded = 1;
@@ -372,15 +307,17 @@ int main(void) {
       }
     }
 
-    if (cap_ok) {
-      int n;
-      while ((n = capture_read(rec, sizeof(rec))) > 0) {
+    if (cap_ok && solo_ok) {
+      int n=0;
+      for (int blocks=0; blocks<8 && (n=capture_read(rec,sizeof(rec)))>0; blocks++) {
         ring_push(rec, n / (sizeof(float) * CAPTURE_CHANNELS));
         busy = 1;
       }
       if (n < 0) {
         log_line("sessione di cattura terminata, riprovo");
         cap_ok = 0;
+        capture_close();
+        reset_ring(); playing=0; pkt_len=0;
         next_cap = t + 0.5;
       }
     }
@@ -389,7 +326,7 @@ int main(void) {
       // L'USB consuma un pacchetto ogni 125us col clock della PS5: si scrive
       // solo quanto serve a restare USB_AHEAD pacchetti avanti, cosi' il FIFO
       // del kernel non aggiunge ritardo.
-      for (;;) {
+      for (int burst=0;burst<USB_AHEAD*2;burst++) {
         double queued = usb_written - (now_sec() - usb_t0) * PKTS_PER_SEC;
         if (queued < 0) {
           st.usb_late++;
@@ -411,17 +348,29 @@ int main(void) {
         }
         if (w == 0) {
           // FIFO pieno: la stima era indietro, riallineala
-          usb_t0 = now_sec() - (double)(usb_written - st.fifo_depth) / PKTS_PER_SEC;
+          usb_t0 = now_sec() - (double)(usb_written - USB_AHEAD) / PKTS_PER_SEC;
         } else {
           log_line("Solo scollegata o errore USB (errno %d)", errno);
           solo_close(&solo);
           solo_ok = 0;
+          capture_close(); cap_ok=0;
+          reset_ring(); playing=0; pkt_len=0;
           next_solo = t + 1.0;
         }
         break;
       }
     }
 
+    if (solo_ok && wanted!=volume_applied) {
+      if (solo_set_volume(&solo,wanted)==0) {
+        volume_applied=wanted; control_applied(wanted);
+        log_line("Hardware volume: %.1f dB, mute=%d",(wanted&255)*0.5-74.0,!!(wanted&TTGK_MUTE));
+      } else {
+        log_line("Hardware volume failed (errno %d); stopping USB output",errno);
+        solo_close(&solo); solo_ok=0; capture_close(); cap_ok=0;
+        reset_ring(); playing=0; pkt_len=0; next_solo=t+1.0;
+      }
+    }
     if (t >= next_stats) {
       char s[512];
       status_text(s, sizeof(s), solo_ok, cap_ok);
@@ -437,9 +386,10 @@ int main(void) {
     solo_close(&solo);
   if (cap_loaded)
     capture_close();
+  control_stop();
   close(lfd);
   log_line("solobridge terminato");
   if (g_log)
     fclose(g_log);
-  return 0;
+  return result;
 }
