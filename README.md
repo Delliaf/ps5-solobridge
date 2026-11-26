@@ -16,12 +16,12 @@ Direct read-only DualSense API is experimental and may be denied to a resident p
 
 ## Local fallback (no listener)
 
-No HTTP or TCP server. A single-instance file lock prevents duplicate playback. Default volume -40 dB; startup verifies hardware mute, writes and reads back both volume channels, then applies the desired mute state. **Keep headphones off your ears on the first test** and verify volume independently.
+No HTTP or TCP server. A single-instance file lock prevents duplicate playback. Default volume -40 dB; startup verifies hardware mute and both volume channels; unmute is deferred until the stream is ready. **Keep headphones off your ears on the first test** and verify volume independently.
 
 - /data/solobridge/volume: verified persisted volume state. Integer 0..148 maps to -74..0 dB in 0.5 dB steps. Add 256 to request mute. Example: 68 = -40 dB, 108 = -20 dB.
 - /data/solobridge/volume.request: write one integer plus newline to a temporary file and rename it to this name atomically. Consumed within about one second. Works if controller API is denied; use an existing local file-management/FTP payload, if available.
 - /data/solobridge/stop: create an empty file to stop gracefully. SIGINT/SIGTERM also stop the resident bridge.
-- /data/solobridge/log.txt: startup and periodic playback diagnostics; diagnostics.log: USB/controller failures.
+- /data/solobridge/log.txt: startup, USB/controller errors and periodic playback diagnostics (rotated).
 - /data/solobridge/disable_pad: create before launch to disable experimental controller calls while testing audio and file controls. Remove before next launch to enable.
 
 Do not use the upstream solobridge.ps1 TCP status/stop script with this fork.
@@ -56,3 +56,11 @@ Upstream ring-buffer/drift logic retained, with bounded capture/USB work, reset 
 Controller ABI references: https://github.com/sub0x00001/octet and https://github.com/blackbearreloaded/ps5-native-gamepad-input-research.
 
 GPL-3.0; see LICENSE and solobridge/NOTICE.md.
+
+## v2 audio engine
+
+Capture IPC, USB control, input/persistence and bounded log output run separately from the isochronous writer. A lock-free single-producer/single-consumer ring, bounded queue pacing and fractional-phase interpolation replace abrupt periodic sample drops/duplicates. Short ramps only smooth discontinuities; volume is still exclusively hardware-controlled. Hardware mute is held until the stream is prebuffered and packets have been accepted. Clock validity is checked. USB control sends only changed values and verifies readback; failures close output and require a muted reconnect. No USB transfers are attempted through a closed control descriptor. The writer does not wait on USB control during normal operation; teardown may wait for a kernel ioctl to return.
+
+The default maximum volume is -6 dB. Set /data/solobridge/max_volume to one integer (0..148, no mute flag) before launching; 148 enables 0 dB. Saved values are clamped. Commands are ignored while disconnected. Logs rotate at 512 KiB with one previous file; errors are now recorded in log.txt rather than diagnostics.log. The USB queue depth is an estimate, not measured hardware latency. A persistent write blockage or large timing gap triggers reconnection. Capture sessions without data for 2 seconds are restarted. USB_FS batching and explicit system rest-mode events are not implemented; both need PS5 testing.
+
+Host tests also exercise ring overflow, prebuffer, underrun, PCM packet packing, phase correction and pacing. The console ABI, actual controller access, USB control latency, and measured end-to-end delay remain unverified.

@@ -12,11 +12,11 @@ ELF := solobridge.elf
 CFLAGS := -Wall -Werror -O2
 LDADD  := -lkernel_sys
 
-SRCS := main.c capture.c solo.c control.c
+SRCS := main.c capture.c solo.c control.c source.c log.c
 
 all: $(ELF)
 
-$(ELF): $(SRCS) capture.h solo.h control.h bridge_logic.h
+$(ELF): $(SRCS) capture.h solo.h control.h bridge_logic.h source.h engine.h log.h
 	$(CC) $(CFLAGS) -o $@ $(SRCS) $(LDADD)
 
 clean:

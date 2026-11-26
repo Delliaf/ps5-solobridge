@@ -3,6 +3,7 @@
  * No injection, privilege changes or synthetic input. */
 #include "control.h"
 #include "bridge_logic.h"
+#include "log.h"
 #include <ps5/kernel.h>
 #include <stdatomic.h>
 #include <pthread.h>
@@ -15,7 +16,18 @@
 #define STATE DIR "/volume"
 #define REQUEST DIR "/volume.request"
 #define STOP DIR "/stop"
+#define ONLINE 1024
+#define MAX_FILE DIR "/max_volume"
+static int max_volume=136; /* -6 dB by default; 148 restores full range */
 static atomic_int desired=TTGK_DEFAULT,applied=-1,quitting=0,pad_ready=0;
+static int clamp_volume(int v) { return (v&255)>max_volume?(v&TTGK_MUTE)|max_volume:v; }
+static void request_volume(int v) {
+  int old=atomic_load(&desired);
+  while (old&ONLINE) {
+    int n=ONLINE|clamp_volume(v);
+    if (atomic_compare_exchange_weak(&desired,&old,n)) return;
+  }
+}
 static pthread_t worker;
 static int started;
 int sceKernelLoadStartModule(const char *,size_t,const void *,uint32_t,void *,int *);
@@ -61,9 +73,9 @@ static int pad_init(void) {
   read_pad=(read_fn)resolve(p,"YndgXqQVV7c");
   if (!ui||!get_user||!pi||!get_handle||!open_pad||!close_pad||!read_pad) return -1;
   int r=ui(NULL);
-  if (r<0) fprintf(stderr,"pad: user init %#x\n",(unsigned)r);
+  if (r<0) log_line("pad: user init %#x",(unsigned)r);
   r=pi();
-  if (r<0) { fprintf(stderr,"pad: init %#x\n",(unsigned)r); return -1; }
+  if (r<0) { log_line("pad: init %#x",(unsigned)r); return -1; }
   return 0;
 }
 static int read_value(const char *path,int *v) {
@@ -93,7 +105,7 @@ static void notify_volume(int v) {
 static void *control_worker(void *arg) {
   (void)arg;
   int pad_ok=0, pad_attempted=access(DIR "/disable_pad",F_OK)==0;
-  if (pad_attempted) fprintf(stderr,"TTGK: DualSense disabled by file\n");
+  if (pad_attempted) log_line("TTGK: DualSense disabled by file");
   int handle=-1,owned=0,user=-1,last=-1,persisted=-1,current;
   if (read_value(STATE,&persisted)<0) persisted=-1;
   uint64_t retry=0,user_check=0,files_at=0,changed=0,notify_at=0;
@@ -102,7 +114,7 @@ static void *control_worker(void *arg) {
     uint64_t t=ms();
     if (!pad_attempted && atomic_load(&pad_ready)) {
       pad_attempted=1; pad_ok=pad_init()==0;
-      if (!pad_ok) fprintf(stderr,"TTGK: direct DualSense API unavailable; use volume.request\n");
+      if (!pad_ok) log_line("TTGK: direct DualSense API unavailable; use volume.request");
     }
     if (pad_ok && t>=user_check) {
       user_check=t+1000;
@@ -115,9 +127,10 @@ static void *control_worker(void *arg) {
     if (pad_ok && handle<0 && user!=-1 && user!=0 && t>=retry) {
       retry=t+5000; handle=get_handle(user,0,0);
       if (handle<0) { handle=open_pad(user,0,0,NULL); owned=handle>=0; }
-      if (handle<0) fprintf(stderr,"TTGK: pad handle unavailable %#x\n",(unsigned)handle);
-      else fprintf(stderr,"TTGK: pad handle ready\n");
+      if (handle<0) log_line("TTGK: pad handle unavailable %#x",(unsigned)handle);
+      else log_line("TTGK: pad handle ready");
     }
+    if (!(atomic_load(&desired)&ONLINE)) { h=(hotkey_t){0}; released=0; }
     if (handle>=0) {
       union { pad_data d; uint64_t align; uint8_t storage[512]; } state={0};
       int r=read_pad(handle,&state);
@@ -127,15 +140,16 @@ static void *control_worker(void *arg) {
       } else {
         uint32_t b=state.d.buttons;
         if ((b&PAD_MOD)!=PAD_MOD) released=1;
-        if (released) atomic_store(&desired,hotkey(&h,b,t,atomic_load(&desired)));
+        int state=atomic_load(&desired);
+        if (released && (state&ONLINE)) request_volume(hotkey(&h,b,t,state&511));
       }
     }
     if (t>=files_at) {
       files_at=t+1000;
       if (unlink(STOP)==0) { atomic_store(&quitting,1); break; }
       if (rename(REQUEST,REQUEST ".processing")==0) {
-        if (read_value(REQUEST ".processing",&current)==0) atomic_store(&desired,current);
-        else fprintf(stderr,"TTGK: invalid volume.request\n");
+        if (read_value(REQUEST ".processing",&current)==0) request_volume(current);
+        else log_line("TTGK: invalid volume.request");
         unlink(REQUEST ".processing");
       }
     }
@@ -156,13 +170,23 @@ static void *control_worker(void *arg) {
   return NULL;
 }
 int control_start(void) {
-  int v; if (read_value(STATE,&v)==0) atomic_store(&desired,v);
+  int v;
+  if (read_value(MAX_FILE,&v)==0 && !(v&TTGK_MUTE)) max_volume=v;
+  if (read_value(STATE,&v)==0) atomic_store(&desired,clamp_volume(v));
+  else atomic_store(&desired,clamp_volume(TTGK_DEFAULT));
   int r=pthread_create(&worker,NULL,control_worker,NULL);
-  if (r) { fprintf(stderr,"TTGK: control thread failed (%d)\n",r); return -1; }
+  if (r) { log_line("TTGK: control thread failed (%d)",r); return -1; }
   started=1; return 0;
 }
 void control_enable_pad(void) { atomic_store(&pad_ready,1); }
-int control_volume(void) { return atomic_load(&desired); }
+int control_volume(void) { return atomic_load(&desired)&511; }
+void control_connected(void) { atomic_fetch_or(&desired,ONLINE); }
+void control_disconnected(int failed) {
+  int last=atomic_load(&applied);
+  if (last<0) last=control_volume();
+  if (failed) last|=TTGK_MUTE;
+  atomic_store(&desired,clamp_volume(last));
+}
 void control_applied(int v) { atomic_store(&applied,v); }
 int control_stop_requested(void) { return atomic_load(&quitting); }
 void control_stop(void) {

@@ -1,398 +1,122 @@
-// TTGK audio bridge. GPL-3.0; based on ps5-solobridge.
+/* GPL-3.0. TTGK bridge: isolated AVCAP, USB control, local input and logs. */
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <sys/file.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
-#include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
-#include <string.h>
 #include <time.h>
 #include <unistd.h>
-
-#include "capture.h"
 #include "solo.h"
 #include "control.h"
-#include "bridge_logic.h"
-
-#define LOG_DIR     "/data/solobridge"
-#define LOG_PATH    LOG_DIR "/log.txt"
-
-#define PKTS_PER_SEC   8000                // microframe USB high-speed
-#define FRAMES_PER_PKT (SOLO_RATE / PKTS_PER_SEC)  // 6 frame ogni 125us
-#define RING_FRAMES    16384               // ~340 ms
-#define REC_FRAMES     1024                // la cattura arriva a blocchi da ~21 ms
-
-// Il ring si riempie a scatti di REC_FRAMES; conta il livello minimo raggiunto
-// (subito prima del blocco successivo): lo si tiene appena sopra lo zero.
-#define MARGIN_TARGET  192                 // ~4 ms
-#define MARGIN_LOW     48
-#define MARGIN_HIGH    480
-#define PREBUFFER      (REC_FRAMES + MARGIN_TARGET)
-#define WINDOW_PKTS    4000                // finestra di misura: 0,5 s
-// Al massimo 1 frame tolto/ripetuto ogni 64 pacchetti (8 ms): variazione di
-// velocita' dello 0,26%, non percepibile come cambio di intonazione.
-#define CORRECT_EVERY  64
-// Oltre questa soglia (es. arretrato consegnato dalla cattura all'avvio) si
-// scarta subito l'eccesso: correggerlo lentamente alzerebbe il pitch per secondi.
-#define JUMP_FILL      4096                // ~85 ms
-
-// Pacchetti tenuti in coda nel FIFO USB oltre a quello in trasmissione.
-#define USB_AHEAD      48                  // ~6 ms
-
-#define STATS_EVERY    60.0
-
-typedef struct { float l, r; } frame_t;
-
-static frame_t g_ring[RING_FRAMES];
-static size_t g_head, g_fill;      // g_head = prossimo frame da leggere
-
-static struct {
-  long packets, silent, drops, dups, underruns, solo_reconnects, cap_restarts;
-  long usb_late;                   // il loop e' arrivato tardi: FIFO USB vuoto
-  long jumps, jumped;              // salti immediati e frame scartati con essi
-  int fifo_depth;                  // pacchetti accettati dal FIFO USB a vuoto
-  uint32_t solo_rate;              // sample rate riletto dalla Solo
-  double usb_queued;               // stima pacchetti in coda
-} st;
-
-static struct {
-  size_t win_min;
-  long win_count;
-  long pending_drop, pending_dup;
-} drift = { (size_t)-1, 0, 0, 0 };
-
-static FILE *g_log;
-static volatile sig_atomic_t g_running = 1;
-static void stop_signal(int sig) { (void)sig; g_running=0; }
-static void reset_ring(void) { g_head=g_fill=0; drift.win_min=(size_t)-1; drift.win_count=0; drift.pending_drop=drift.pending_dup=0; }
-
-// --- log -------------------------------------------------------------------
-
-static void log_line(const char *fmt, ...) {
-  char msg[512];
-  va_list ap;
-  va_start(ap, fmt);
-  vsnprintf(msg, sizeof(msg), fmt, ap);
-  va_end(ap);
-
-  time_t t = time(NULL);
-  struct tm tm;
-  localtime_r(&t, &tm);
-  char ts[16];
-  strftime(ts, sizeof(ts), "%H:%M:%S", &tm);
-
-  printf("[%s] %s\n", ts, msg);
-  fflush(stdout);
-  if (g_log) {
-    fprintf(g_log, "[%s] %s\n", ts, msg);
-    fflush(g_log);
-  }
-}
-
+#include "source.h"
+#include "engine.h"
+#include "log.h"
+#define DIR "/data/solobridge"
+static volatile sig_atomic_t running=1;
+static void stop_signal(int s) { (void)s; running=0; }
 static double now_sec(void) {
-  struct timespec ts;
-  clock_gettime(CLOCK_MONOTONIC, &ts);
-  return ts.tv_sec + ts.tv_nsec / 1e9;
+  struct timespec t; clock_gettime(CLOCK_MONOTONIC,&t);
+  return t.tv_sec+t.tv_nsec/1e9;
 }
-
-// --- ring buffer -----------------------------------------------------------
-
-static void ring_push(const float *in, size_t frames) {
-  for (size_t i = 0; i < frames; i++) {
-    if (g_fill == RING_FRAMES) {   // pieno: scarta il frame piu' vecchio
-      g_head = (g_head + 1) % RING_FRAMES;
-      g_fill--;
-    }
-    size_t tail = (g_head + g_fill) % RING_FRAMES;
-    g_ring[tail].l = in[2 * i];
-    g_ring[tail].r = in[2 * i + 1];
-    g_fill++;
-  }
-}
-
-static frame_t ring_pop(void) {
-  frame_t f = g_ring[g_head];
-  g_head = (g_head + 1) % RING_FRAMES;
-  g_fill--;
-  return f;
-}
-
-// --- conversione -----------------------------------------------------------
-
-static void put_sample(uint8_t **p, float v, int subslot) {
-  uint32_t s = pcm_word(v);
-  if (subslot < 4)
-    s >>= (4 - subslot) * 8;
-  for (int b = 0; b < subslot; b++)
-    *(*p)++ = s >> (8 * b);
-}
-
-static size_t silent_packet(uint8_t *pkt, const solo_t *s) {
-  uint8_t *p = pkt;
-  for (int f = 0; f < FRAMES_PER_PKT; f++)
-    for (int c = 0; c < s->channels; c++)
-      put_sample(&p, 0.0f, s->subslot);
-  return p - pkt;
-}
-
-// Ogni WINDOW_PKTS pacchetti decide quanti frame togliere (ritardo in eccesso)
-// o ripetere (margine troppo basso) in base al livello minimo del ring.
-static void drift_update(void) {
-  if (g_fill < drift.win_min)
-    drift.win_min = g_fill;
-  if (++drift.win_count < WINDOW_PKTS)
-    return;
-  drift.pending_drop = drift.pending_dup = 0;
-  if (drift.win_min > MARGIN_HIGH)
-    drift.pending_drop = drift.win_min - MARGIN_TARGET;
-  else if (drift.win_min < MARGIN_LOW)
-    drift.pending_dup = MARGIN_TARGET - drift.win_min;
-  drift.win_min = (size_t)-1;
-  drift.win_count = 0;
-}
-
-// Prepara il prossimo pacchetto. Gestisce prebuffer, underrun e deriva tra
-// il clock dell'audio PS5 e quello dell'USB togliendo o ripetendo un frame.
-static size_t build_packet(uint8_t *pkt, const solo_t *s, int *playing) {
-  uint8_t *p = pkt;
-
-  if (!*playing && g_fill >= PREBUFFER) {
-    *playing = 1;
-    drift.win_min = (size_t)-1;
-    drift.win_count = 0;
-    drift.pending_drop = drift.pending_dup = 0;
-  } else if (*playing && g_fill < FRAMES_PER_PKT) {
-    *playing = 0;
-    st.underruns++;
-  }
-  if (!*playing) {
-    st.silent++;
-    return silent_packet(pkt, s);
-  }
-
-  if (g_fill > JUMP_FILL) {
-    size_t skip = g_fill - PREBUFFER;
-    g_head = (g_head + skip) % RING_FRAMES;
-    g_fill -= skip;
-    st.jumps++;
-    st.jumped += skip;
-    drift.win_min = (size_t)-1;
-    drift.win_count = 0;
-    drift.pending_drop = drift.pending_dup = 0;
-  }
-
-  drift_update();
-  int dup = 0;
-  if (st.packets % CORRECT_EVERY == 0) {
-    if (drift.pending_drop > 0 && g_fill > 2 * FRAMES_PER_PKT) {
-      ring_pop();
-      drift.pending_drop--;
-      st.drops++;
-    } else if (drift.pending_dup > 0) {
-      dup = 1;
-      drift.pending_dup--;
-      st.dups++;
-    }
-  }
-
-  frame_t f = {0, 0};
-  for (int i = 0; i < FRAMES_PER_PKT; i++) {
-    if (!(dup && i == FRAMES_PER_PKT - 1))
-      f = ring_pop();
-    for (int c = 0; c < s->channels; c++)
-      put_sample(&p, (c & 1) ? f.r : f.l, s->subslot);
-  }
-  return p - pkt;
-}
-
-static void status_text(char *out, size_t size, int solo_ok, int cap_ok) {
-  double ring_ms = g_fill * 1000.0 / SOLO_RATE;
-  double usb_ms = st.usb_queued * 1000.0 / PKTS_PER_SEC;
-  snprintf(out, size,
-           "solo: %s | cattura: %s\n"
-           "latenza nostra: %.1f ms (ring %.1f + USB %.1f), min ring ultima finestra %zu frame\n"
-           "pacchetti %ld, silenzio %ld, underrun %ld, drop %ld, dup %ld, USB in ritardo %ld\n"
-           "salti %ld (%ld frame), sample rate Solo %u Hz\n"
-           "FIFO USB %d pacchetti, riconnessioni solo %ld, riavvii cattura %ld, overrun cattura %ld\n",
-           solo_ok ? "collegata" : "assente", cap_ok ? "attiva" : "in attesa",
-           ring_ms + usb_ms, ring_ms, usb_ms,
-           drift.win_min == (size_t)-1 ? 0 : drift.win_min,
-           st.packets, st.silent, st.underruns, st.drops, st.dups, st.usb_late,
-           st.jumps, st.jumped, st.solo_rate,
-           st.fifo_depth, st.solo_reconnects, st.cap_restarts, capture_overruns());
-}
-
-// --- main ------------------------------------------------------------------
-
 int main(void) {
-  signal(SIGPIPE, SIG_IGN);
-
-  signal(SIGTERM, stop_signal);
-  signal(SIGINT, stop_signal);
-  umask(0077);
-  mkdir(LOG_DIR, 0700);
-  int lfd=open(LOG_DIR "/instance.lock",O_CREAT|O_RDWR,0600);
-  if (lfd<0 || flock(lfd,LOCK_EX|LOCK_NB)<0) {
-    if (lfd>=0) close(lfd);
-    fprintf(stderr,"TTGK: already running or cannot lock instance\n");
-    return 1;
+  signal(SIGPIPE,SIG_IGN); signal(SIGINT,stop_signal); signal(SIGTERM,stop_signal);
+  umask(0077); mkdir(DIR,0700);
+  int lock=open(DIR "/instance.lock",O_CREAT|O_RDWR,0600);
+  if (lock<0 || flock(lock,LOCK_EX|LOCK_NB)<0) {
+    if (lock>=0) close(lock);
+    fprintf(stderr,"TTGK: already running or cannot lock instance\n"); return 1;
   }
-  g_log=fopen(LOG_PATH,"a");
-  if (!freopen(LOG_DIR "/diagnostics.log","a",stderr))
-    log_line("Cannot open diagnostics.log");
-  log_line("TTGK audio bridge started (pid %d), no network listener",getpid());
-  if (control_start()<0) log_line("Control unavailable; using saved/default volume");
-
-  solo_t solo;
-  int solo_ok = 0, cap_ok = 0, cap_loaded = 0, playing = 0;
-  double next_solo = 0, next_cap = 0, next_stats = now_sec() + STATS_EVERY;
-  static float rec[CAPTURE_RECORD / sizeof(float)];
-  uint8_t pkt[512];
-  size_t pkt_len = 0;          // pacchetto pronto ma non ancora accettato
-  double usb_t0 = 0;           // stima: pacchetti consumati = (t - usb_t0) * 8000
-  long usb_written = 0;
-  int volume_applied=-1, result=0;
-
-  while (g_running && !control_stop_requested()) {
-    double t = now_sec();
-    int busy = 0;
-
-    int wanted=control_volume();
-
-    if (!solo_ok && t >= next_solo) {
-      if (solo_open(&solo, 1, wanted) == 0) {
-        solo_ok = 1;
-        playing = 0;
-        pkt_len = 0;
-        reset_ring();
-        volume_applied=wanted;
-        control_applied(wanted);
-        st.solo_reconnects++;
-        st.solo_rate = solo.rate;
-        // Prime only our latency target, not the entire kernel FIFO.
-        size_t len = silent_packet(pkt, &solo);
-        int depth = 0;
-        while (depth < USB_AHEAD && solo_write(&solo, pkt, len) == 1)
-          depth++;
-        st.fifo_depth = depth;
-        usb_written = depth;
-        usb_t0 = now_sec();      // tutto il FIFO e' ancora da trasmettere
-        log_line("TTGK connected: streaming at %d Hz, primed %d packets (%.1f ms)",
-                 SOLO_RATE, depth, depth * 1000.0 / PKTS_PER_SEC);
-      } else {
-        next_solo = t + 1.0;
-      }
+  if (log_start()<0) { close(lock); return 1; }
+  log_line("TTGK v2: started pid=%d; no network listener",getpid());
+  if (control_start()<0) { log_line("control worker failed"); log_stop(); close(lock); return 1; }
+  static source_t src;
+  if (source_start(&src)<0) { log_line("capture worker failed"); control_stop(); log_stop(); close(lock); return 1; }
+  solo_t solo; int online=0,result=0,have=0,gate=0,ack=-1;
+  double next_open=0,next_stats=now_sec()+30,blocked_since=0,ready_since=0,last_tick=now_sec();
+  unsigned epoch=0;
+  eng_player player; eng_player_init(&player);
+  eng_pacer pace; eng_pace_init(&pace,last_tick);
+  uint8_t packet[ENG_BYTES];
+  uint64_t reconnects=0,late_total=0,blocked_total=0;
+  while (running && !control_stop_requested()) {
+    double now=now_sec();
+    int failed=0,volume_failure=0;
+    if (atomic_load(&src.fatal)) { result=1; break; }
+    if (online && now-last_tick>0.25) { log_line("timing gap %.0fms; reopen USB",1000*(now-last_tick)); failed=1; }
+    last_tick=now;
+    if (!online && now>=next_open) {
+      if (solo_open(&solo,1,control_volume())==0) {
+        online=1; reconnects++; have=gate=0; ack=-1; ready_since=blocked_since=0;
+        eng_reset(&src.ring,&player); eng_pace_init(&pace,now_sec());
+        epoch=atomic_load(&src.epoch);
+        source_enable(&src,1); control_connected(); last_tick=now_sec();
+      } else next_open=now_sec()+1;
     }
-
-    if (solo_ok && !cap_ok && t >= next_cap) {
-      int r;
-      if (!cap_loaded) {
-        r = capture_open();
-        if (r < 0) {
-          log_line("cattura non disponibile: librerie non caricabili, esco");
-          result=1;
+    if (online && !failed) {
+      unsigned current=atomic_load(&src.epoch);
+      if (current!=epoch) {
+        epoch=current; eng_reset(&src.ring,&player);
+        have=gate=0; ready_since=0;
+      }
+      int cap=atomic_load(&src.active);
+      if (!cap && player.playing) { eng_reset(&src.ring,&player); have=0; }
+      eng_pace_tick(&pace,now_sec());
+      int written=0;
+      for (int burst=0;burst<96 && eng_pace_need(&pace);burst++) {
+        if (!have) {
+          if (cap) eng_packet(&src.ring,&player,packet);
+          else { for (unsigned i=0;i<ENG_BYTES;i++) packet[i]=0; }
+          have=1;
+        }
+        int w=solo_write(&solo,packet,sizeof(packet));
+        if (w<0) { log_line("USB write failed errno=%d",errno); failed=1; break; }
+        if (!w) {
+          eng_pace_block(&pace);
+          if (!blocked_since) blocked_since=now_sec();
+          if (now_sec()-blocked_since>0.25) { log_line("USB FIFO blocked >250ms"); failed=1; }
           break;
         }
-        cap_loaded = 1;
-        control_enable_pad();
-      } else {
-        r = capture_restart();
-        st.cap_restarts++;
+        have=0; blocked_since=0; eng_pace_write(&pace); written++;
       }
-      if (r == 1) {
-        cap_ok = 1;
-        log_line("cattura audio di sistema attiva");
-      } else {
-        next_cap = t + 0.5;
+      /* Keep hardware muted until capture is prebuffered and packets accepted.
+       * Gate is also removed on session loss and underrun. */
+      double t=now_sec();
+      if (cap && player.playing && !failed && !blocked_since) {
+        if (!ready_since) ready_since=t;
+        if (t-ready_since>=0.004) gate=1;
+      } else { ready_since=0; gate=0; }
+      solo_request_volume(&solo,control_volume(),gate);
+      if (solo_volume_error(&solo)) { failed=1; volume_failure=1; }
+      int done=solo_volume_done(&solo);
+      if (done>=0 && done!=ack) {
+        ack=done; control_applied(done);
+        log_line("volume verified: %.1f dB mute=%d",(done&255)*0.5-74.0,!!(done&TTGK_MUTE));
       }
+      if (!failed && !written) usleep(250);
     }
-
-    if (cap_ok && solo_ok) {
-      int n=0;
-      for (int blocks=0; blocks<8 && (n=capture_read(rec,sizeof(rec)))>0; blocks++) {
-        ring_push(rec, n / (sizeof(float) * CAPTURE_CHANNELS));
-        busy = 1;
-      }
-      if (n < 0) {
-        log_line("sessione di cattura terminata, riprovo");
-        cap_ok = 0;
-        capture_close();
-        reset_ring(); playing=0; pkt_len=0;
-        next_cap = t + 0.5;
-      }
+    if (online && failed) {
+      control_disconnected(volume_failure);
+      source_enable(&src,0);
+      solo_close(&solo); online=0;
+      late_total+=pace.late; blocked_total+=pace.blocked;
+      eng_reset(&src.ring,&player); next_open=now_sec()+1; last_tick=now_sec();
     }
-
-    if (solo_ok) {
-      // L'USB consuma un pacchetto ogni 125us col clock della PS5: si scrive
-      // solo quanto serve a restare USB_AHEAD pacchetti avanti, cosi' il FIFO
-      // del kernel non aggiunge ritardo.
-      for (int burst=0;burst<USB_AHEAD*2;burst++) {
-        double queued = usb_written - (now_sec() - usb_t0) * PKTS_PER_SEC;
-        if (queued < 0) {
-          st.usb_late++;
-          usb_t0 = now_sec() - (double)usb_written / PKTS_PER_SEC;
-          queued = 0;
-        }
-        st.usb_queued = queued;
-        if (queued >= USB_AHEAD)
-          break;
-        if (!pkt_len)
-          pkt_len = build_packet(pkt, &solo, &playing);
-        int w = solo_write(&solo, pkt, pkt_len);
-        if (w == 1) {
-          pkt_len = 0;
-          usb_written++;
-          st.packets++;
-          busy = 1;
-          continue;
-        }
-        if (w == 0) {
-          // FIFO pieno: la stima era indietro, riallineala
-          usb_t0 = now_sec() - (double)(usb_written - USB_AHEAD) / PKTS_PER_SEC;
-        } else {
-          log_line("Solo scollegata o errore USB (errno %d)", errno);
-          solo_close(&solo);
-          solo_ok = 0;
-          capture_close(); cap_ok=0;
-          reset_ring(); playing=0; pkt_len=0;
-          next_solo = t + 1.0;
-        }
-        break;
-      }
+    now=now_sec();
+    if (now>=next_stats) {
+      log_line("status usb=%d capture=%d ring=%zu frames target=%u phase_ppm=%d queue_est=%.1f packets underruns=%llu skipped=%llu late=%llu blocked=%llu source_drop=%lu source_overruns=%lu reconnects=%llu",
+        online,atomic_load(&src.active),eng_fill(&src.ring),player.target,player.delta*1000000/ENG_Q,pace.queued,
+        (unsigned long long)player.underruns,(unsigned long long)player.skipped,
+        (unsigned long long)(late_total+(online?pace.late:0)),(unsigned long long)(blocked_total+(online?pace.blocked:0)),
+        atomic_load(&src.dropped),atomic_load(&src.overruns),(unsigned long long)reconnects);
+      next_stats=now+30;
     }
-
-    if (solo_ok && wanted!=volume_applied) {
-      if (solo_set_volume(&solo,wanted)==0) {
-        volume_applied=wanted; control_applied(wanted);
-        log_line("Hardware volume: %.1f dB, mute=%d",(wanted&255)*0.5-74.0,!!(wanted&TTGK_MUTE));
-      } else {
-        log_line("Hardware volume failed (errno %d); stopping USB output",errno);
-        solo_close(&solo); solo_ok=0; capture_close(); cap_ok=0;
-        reset_ring(); playing=0; pkt_len=0; next_solo=t+1.0;
-      }
-    }
-    if (t >= next_stats) {
-      char s[512];
-      status_text(s, sizeof(s), solo_ok, cap_ok);
-      log_line("stato:\n%s", s);
-      next_stats = t + STATS_EVERY;
-    }
-
-    if (!busy)
-      usleep(solo_ok ? 250 : 100000);
+    if (!online) usleep(50000);
   }
-
-  if (solo_ok)
-    solo_close(&solo);
-  if (cap_loaded)
-    capture_close();
-  control_stop();
-  log_line("TTGK stopped");
-  if (g_log)
-    fclose(g_log);
-  close(lfd);
-  return result;
+  control_disconnected(0); source_enable(&src,0);
+  if (online) solo_close(&solo);
+  source_stop(&src); control_stop(); log_line("TTGK stopped result=%d",result);
+  log_stop(); close(lock); return result;
 }

@@ -1,6 +1,8 @@
 /* TTGK 3302:33c0 UAC2 synchronous 48kHz packed 24-bit. GPL-3.0. */
 #include "solo.h"
 #include "bridge_logic.h"
+#include "log.h"
+#include <time.h>
 #include <sys/types.h>
 #include <sys/ioctl.h>
 #include <dirent.h>
@@ -52,22 +54,66 @@ static int set_mute(solo_t *s,int mute) {
   uint8_t v=(uint8_t)!!mute,got=0xff;
   if (request(s,1,2,1,0,&v,1)<0 || request(s,0,2,1,0,&got,1)<0) return -1;
   if (got!=v) { errno=EIO; return -1; }
+  s->hw_mute=mute;
   return 0;
 }
-int solo_set_volume(solo_t *s,int volume) {
+/* Only the control worker touches the control fd during streaming.
+ * Startup/shutdown own it only before/after join. */
+static int apply_volume(solo_t *s,int volume) {
   if (!volume_valid(volume)) { errno=EINVAL; return -1; }
-  uint16_t value=(uint16_t)volume_units(volume);
-  if ((volume&TTGK_MUTE) && set_mute(s,1)<0) goto fail;
-  for (int c=1;c<=2;c++) {
-    uint8_t d[2]={(uint8_t)value,(uint8_t)(value>>8)},got[2]={0};
-    if (request(s,1,2,2,c,d,2)<0 || request(s,0,2,2,c,got,2)<0) goto fail;
-    if (memcmp(d,got,2)) { errno=EIO; goto fail; }
+  int mute=!!(volume&TTGK_MUTE),v=volume&255;
+  if (mute && s->hw_mute!=1 && set_mute(s,1)<0) goto fail;
+  if (s->hw_volume!=v) {
+    uint16_t value=(uint16_t)volume_units(v);
+    for (int c=1;c<=2;c++) {
+      uint8_t d[2]={(uint8_t)value,(uint8_t)(value>>8)},got[2]={0};
+      if (request(s,1,2,2,c,d,2)<0 || request(s,0,2,2,c,got,2)<0) goto fail;
+      if (memcmp(d,got,2)) { errno=EIO; goto fail; }
+    }
+    s->hw_volume=v;
   }
-  if (!(volume&TTGK_MUTE) && set_mute(s,0)<0) goto fail;
+  if (!mute && s->hw_mute!=0 && set_mute(s,0)<0) goto fail;
   return 0;
 fail: {
-    int saved=errno; set_mute(s,1); errno=saved; return -1;
+    int saved=errno;
+    s->hw_volume=-1;
+    set_mute(s,1); errno=saved; return -1;
   }
+}
+#define HOLD_MUTE 512
+static void *volume_run(void *arg) {
+  solo_t *s=arg; int last=-1;
+  while (!atomic_load(&s->volume_stop)) {
+    int v=atomic_load(&s->volume_wanted);
+    if (v!=last) {
+      int physical=(v&511)|((v&HOLD_MUTE)?TTGK_MUTE:0);
+      if (apply_volume(s,physical)<0) {
+        log_line("USB: volume control failed errno=%d; closing stream",errno);
+        atomic_store(&s->volume_error,1); break;
+      }
+      last=v; atomic_store(&s->volume_done,v);
+    }
+    usleep(10000);
+  }
+  return NULL;
+}
+void solo_request_volume(solo_t *s,int volume,int ready) {
+  atomic_store(&s->volume_wanted,volume|(ready?0:HOLD_MUTE));
+}
+int solo_volume_done(solo_t *s) {
+  int v=atomic_load(&s->volume_done);
+  return v<0 || (v&HOLD_MUTE)?-1:v;
+}
+int solo_volume_error(solo_t *s) { return atomic_load(&s->volume_error); }
+static int clock_valid(solo_t *s) {
+  /* Clock Source 9 advertises read access to Clock Validity. */
+  for (int i=0;i<20;i++) {
+    uint8_t valid=0;
+    if (request(s,0,9,2,0,&valid,1)<0) return -1;
+    if (valid==1) return 0;
+    usleep(10000);
+  }
+  errno=ETIMEDOUT; return -1;
 }
 static int clock_rate(solo_t *s,int write) {
   uint8_t rate[4]={0x80,0xbb,0,0};
@@ -81,6 +127,9 @@ static int clock_rate(solo_t *s,int write) {
 }
 int solo_open(solo_t *s,int verbose,int volume) {
   memset(s,0,sizeof(*s)); s->ctl_fd=s->ep_fd=-1;
+  s->hw_volume=s->hw_mute=-1;
+  atomic_init(&s->volume_wanted,volume|HOLD_MUTE); atomic_init(&s->volume_done,-1);
+  atomic_init(&s->volume_stop,0); atomic_init(&s->volume_error,0);
   s->ctl_fd=find_solo(s);
   if (s->ctl_fd<0) return -1;
   uint8_t buf[4096]={0};
@@ -99,14 +148,18 @@ int solo_open(solo_t *s,int verbose,int volume) {
   if (rate_set<0 || clock_rate(s,0)<0) {
     if (clock_rate(s,1)<0 || clock_rate(s,0)<0) goto fail;
   }
+  what="clock validity"; if (clock_valid(s)<0) goto fail;
   char path[40]; snprintf(path,sizeof(path),"/dev/usb/%d.%d.1",s->bus,s->addr);
   what=path; s->ep_fd=open(path,O_WRONLY|O_NONBLOCK);
   if (s->ep_fd<0) goto fail;
-  what="initial hardware volume"; if (solo_set_volume(s,volume)<0) goto fail;
-  if (verbose) printf("TTGK ugen%d.%d: 48000 Hz stereo packed 24-bit ep 01\n",s->bus,s->addr);
+  what="initial hardware volume"; if (apply_volume(s,volume|TTGK_MUTE)<0) goto fail;
+  what="volume thread"; int err=pthread_create(&s->volume_thread,NULL,volume_run,s);
+  if (err) { errno=err; goto fail; }
+  s->worker_started=1;
+  if (verbose) log_line("TTGK ugen%d.%d: 48000 Hz stereo packed 24-bit ep 01",s->bus,s->addr);
   return 0;
 fail:
-  fprintf(stderr,"TTGK: %s failed (errno %d)\n",what,errno);
+  log_line("TTGK: %s failed (errno %d)",what,errno);
   solo_close(s); return -1;
 }
 int solo_write(solo_t *s,const void *pkt,size_t len) {
@@ -118,8 +171,10 @@ int solo_write(solo_t *s,const void *pkt,size_t len) {
   return -1;
 }
 void solo_close(solo_t *s) {
-  if (s->ctl_fd>=0 && s->configured) set_mute(s,1);
+  if (s->worker_started) atomic_store(&s->volume_stop,1);
   if (s->ep_fd>=0) { close(s->ep_fd); s->ep_fd=-1; }
+  if (s->worker_started) { pthread_join(s->volume_thread,NULL); s->worker_started=0; }
+  if (s->ctl_fd>=0 && s->configured) set_mute(s,1);
   if (s->ctl_fd>=0) {
     if (s->configured) set_alt(s,0);
     close(s->ctl_fd); s->ctl_fd=-1;
