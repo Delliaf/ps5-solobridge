@@ -27,6 +27,8 @@ jobs:
           trap 'rm -rf "$root"' EXIT
           cc -std=gnu11 -Wall -Wextra -Werror -O2 -pthread -fsanitize=undefined,address -fno-omit-frame-pointer -DPROBE_ROOT=\"$root\" tests/test_probe_runtime.c solobridge/probe.c -o /tmp/ttgk-probe-runtime
           /tmp/ttgk-probe-runtime
+          cc -std=gnu11 -Wall -Wextra -Werror -O2 -pthread -fsanitize=undefined,address -fno-omit-frame-pointer -DWEB_ROOT=\"$root\" -DWEB_PORT=19160 tests/web_harness.c solobridge/web.c -o /tmp/ttgk-web
+          python3 tests/test_web.py "$root" 19160 /tmp/ttgk-web
       - run: |
           python3 -m venv /tmp/ttgk-analyzer
           /tmp/ttgk-analyzer/bin/pip install numpy

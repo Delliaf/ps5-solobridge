@@ -247,6 +247,15 @@ int control_start(void) {
   return 0;
 }
 int control_set(int v) { return volume_valid(v)?request_volume(v):0; }
+int control_adjust(int delta,int toggle) {
+  int old=atomic_load(&desired);
+  while (old&ONLINE) {
+    int v=old&511;
+    int n=ONLINE|clamp_volume(toggle?(v^TTGK_MUTE):volume_step(v,delta));
+    if (atomic_compare_exchange_weak(&desired,&old,n)) return 1;
+  }
+  return 0;
+}
 int control_limit(void) { return max_volume; }
 int control_verified(void) { return atomic_load(&applied); }
 int control_online(void) { return !!(atomic_load(&desired)&ONLINE); }

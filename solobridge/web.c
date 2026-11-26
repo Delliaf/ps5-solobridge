@@ -19,8 +19,14 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <time.h>
-#define ROOT "/data/solobridge"
-#define PORT 9160
+#ifndef WEB_ROOT
+#define WEB_ROOT "/data/solobridge"
+#endif
+#ifndef WEB_PORT
+#define WEB_PORT 9160
+#endif
+#define ROOT WEB_ROOT
+#define PORT WEB_PORT
 #define KEYFILE ROOT "/web_key"
 #define DISABLE ROOT "/disable_web"
 #define REQMAX 8192
@@ -29,7 +35,7 @@ static pthread_t worker;
 static int started,listener=-1;
 static char key[17];
 static pthread_mutex_t lock=PTHREAD_MUTEX_INITIALIZER;
-static web_audio audio;
+static web_audio audio={.hw=-1};
 static uint64_t ms(void) {
   struct timespec t; clock_gettime(CLOCK_MONOTONIC,&t);
   return (uint64_t)t.tv_sec*1000+t.tv_nsec/1000000;
@@ -104,7 +110,8 @@ static int parse_num(const char *p,int *out) {
   if(!*p)return 0;
   unsigned v=0;
   for(;*p;p++){if(*p<'0'||*p>'9'||v>511)return 0;v=v*10+(unsigned)(*p-'0');}
-  if(v>511)return 0;*out=(int)v;return 1;
+  if(v>511)return 0;
+  *out=(int)v;return 1;
 }
 static int persist_disable(void) {
   int fd=open(DISABLE,O_WRONLY|O_CREAT|O_TRUNC,0600);
@@ -140,6 +147,10 @@ static void serve(int fd) {
   int v;
   if(!strncmp(path,"/api/volume/",12)&&parse_num(path+12,&v)){
     if(!control_set(v)){plain(fd,409,"DAC offline or invalid value");return;}plain(fd,200,"requested; wait for readback");
+  } else if(!strcmp(path,"/api/volume/up")||!strcmp(path,"/api/volume/down")||!strcmp(path,"/api/volume/toggle")){
+    int toggle=!strcmp(path,"/api/volume/toggle");
+    if(!control_adjust(!strcmp(path,"/api/volume/up")?4:-4,toggle)){plain(fd,409,"DAC offline");return;}
+    plain(fd,200,"requested; wait for readback");
   } else if(!strcmp(path,"/api/trace/on")||!strcmp(path,"/api/trace/off")){
     control_pad_trace(!strcmp(path,"/api/trace/on"));plain(fd,200,"OK");
   } else if(!strcmp(path,"/api/web/off")||!strcmp(path,"/api/web/disable")){
@@ -167,7 +178,9 @@ static void *run(void *arg) {
 }
 static int make_key(void) {
   /* Fresh per launch; never expose via unauthenticated HTTP or log. */
-  unsigned char bytes[8];int fd=open("/dev/urandom",O_RDONLY);if(fd<0)return -1;
+  unsigned char bytes[8];int fd=open("/dev/urandom",O_RDONLY);
+  if(fd<0)fd=open("/dev/random",O_RDONLY);
+  if(fd<0)return -1;
   size_t n=0;while(n<sizeof(bytes)){ssize_t r=read(fd,bytes+n,sizeof(bytes)-n);if(r<0&&errno==EINTR)continue;if(r<=0){close(fd);return -1;}n+=(size_t)r;}close(fd);
   for(unsigned i=0;i<sizeof(bytes);i++)snprintf(key+2*i,3,"%02x",bytes[i]);
   FILE *fp=fopen(KEYFILE ".tmp","w");if(!fp)return -1;

@@ -3,6 +3,7 @@
 #include <stdint.h>
 typedef struct { int stage,err,handle,user,connected,phase; uint32_t buttons,last_pressed,changes,reads; uint64_t last_ms; } pad_snapshot;
 int control_set(int v);
+int control_adjust(int delta,int toggle);
 int control_limit(void);
 int control_verified(void);
 int control_online(void);
