@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <stdatomic.h>
 #include <pthread.h>
+#include <semaphore.h>
 #include "volume_logic.h"
 #define SOLO_RATE 48000
 typedef struct {
@@ -11,7 +12,9 @@ typedef struct {
   uint16_t maxpkt;
   uint32_t rate;
   hw_volume_state hw;
-  int worker_started,transaction;
+  int worker_started,transaction,sem_initialized;
+  sem_t volume_event;
+  atomic_int event_ok;
   pthread_t volume_thread;
   atomic_int volume_wanted,volume_done,volume_stop,volume_error;
   atomic_uint_fast64_t volume_busy_ms;

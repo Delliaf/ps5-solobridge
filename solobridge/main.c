@@ -55,13 +55,16 @@ int main(void) {
         source_enable(&src,1); control_connected(); last_tick=now_sec();
       } else next_open=now_sec()+1;
     }
+    if (online && !failed && solo_volume_error(&solo)) {
+      log_line("USB control failed or blocked >500ms"); failed=volume_failure=1;
+    }
     if (online && !failed) {
       unsigned current=atomic_load(&src.epoch);
       if (current!=epoch) {
         epoch=current; eng_reset(&src.ring,&player);
         have=gate=0; ready_since=0;
       }
-      int cap=atomic_load(&src.active);
+      int cap=source_active(&src);
       if (!cap) {
         if (player.playing || have || eng_fill(&src.ring)) { eng_reset(&src.ring,&player); have=0; }
         gate=0; ready_since=0;
@@ -110,7 +113,7 @@ int main(void) {
     now=now_sec();
     if (now>=next_stats) {
       log_line("status usb=%d capture=%d ring=%zu frames target=%u phase_ppm=%d queue_est=%.1f packets underruns=%llu skipped=%llu late=%llu blocked=%llu source_drop=%lu source_overruns=%lu reconnects=%llu",
-        online,atomic_load(&src.active),eng_fill(&src.ring),player.target,player.delta*1000000/ENG_Q,pace.queued,
+        online,source_active(&src),eng_fill(&src.ring),player.target,player.delta*1000000/ENG_Q,pace.queued,
         (unsigned long long)player.underruns,(unsigned long long)player.skipped,
         (unsigned long long)(late_total+(online?pace.late:0)),(unsigned long long)(blocked_total+(online?pace.blocked:0)),
         atomic_load(&src.dropped),atomic_load(&src.overruns),(unsigned long long)reconnects);

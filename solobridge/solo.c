@@ -99,14 +99,26 @@ static void *volume_run(void *arg) {
         set_mute(s,1); break;
       }
       if (!r) { last=v; atomic_store(&s->volume_done,v); }
+      else { last=-1; atomic_store(&s->volume_done,-1); }
     }
-    usleep(10000);
+    if (atomic_load(&s->volume_stop)) break;
+    if (atomic_load(&s->volume_wanted)!=last) continue;
+    if (atomic_load(&s->event_ok)) {
+      /* One post per changed request; periodic timeout is a safety fallback. */
+      struct timespec deadline;
+      clock_gettime(CLOCK_REALTIME,&deadline);
+      deadline.tv_nsec+=100000000;
+      if (deadline.tv_nsec>=1000000000) { deadline.tv_nsec-=1000000000; deadline.tv_sec++; }
+      if (sem_timedwait(&s->volume_event,&deadline)<0 && errno!=ETIMEDOUT && errno!=EINTR)
+        atomic_store(&s->event_ok,0);
+    } else usleep(10000);
   }
   return NULL;
 }
 void solo_request_volume(solo_t *s,int volume,int ready) {
   int v=volume|(ready?0:HOLD_MUTE);
-  if (atomic_load(&s->volume_wanted)!=v) atomic_store(&s->volume_wanted,v);
+  if (atomic_exchange(&s->volume_wanted,v)!=v && atomic_load(&s->event_ok))
+    if (sem_post(&s->volume_event)<0) atomic_store(&s->event_ok,0);
 }
 int solo_volume_done(solo_t *s) {
   int v=atomic_load(&s->volume_done);
@@ -140,7 +152,7 @@ int solo_open(solo_t *s,int verbose,int volume) {
   memset(s,0,sizeof(*s)); s->ctl_fd=s->ep_fd=-1;
   s->hw=(hw_volume_state){-1,-1};
   atomic_init(&s->volume_wanted,volume|HOLD_MUTE); atomic_init(&s->volume_done,-1);
-  atomic_init(&s->volume_stop,0); atomic_init(&s->volume_error,0); atomic_init(&s->volume_busy_ms,0);
+  atomic_init(&s->volume_stop,0); atomic_init(&s->volume_error,0); atomic_init(&s->volume_busy_ms,0); atomic_init(&s->event_ok,0);
   s->ctl_fd=find_solo(s);
   if (s->ctl_fd<0) return -1;
   uint8_t buf[4096]={0};
@@ -164,6 +176,7 @@ int solo_open(solo_t *s,int verbose,int volume) {
   what=path; s->ep_fd=open(path,O_WRONLY|O_NONBLOCK);
   if (s->ep_fd<0) goto fail;
   what="initial hardware volume"; if (apply_volume(s,volume|TTGK_MUTE)<0) goto fail;
+  if (sem_init(&s->volume_event,0,0)==0) { s->sem_initialized=1; atomic_store(&s->event_ok,1); }
   what="volume thread"; int err=pthread_create(&s->volume_thread,NULL,volume_run,s);
   if (err) { errno=err; goto fail; }
   s->worker_started=1;
@@ -182,9 +195,13 @@ int solo_write(solo_t *s,const void *pkt,size_t len) {
   return -1;
 }
 void solo_close(solo_t *s) {
-  if (s->worker_started) { atomic_store(&s->volume_stop,1); atomic_fetch_or(&s->volume_wanted,HOLD_MUTE); }
+  if (s->worker_started) {
+    atomic_store(&s->volume_stop,1); atomic_fetch_or(&s->volume_wanted,HOLD_MUTE);
+    if (s->sem_initialized) sem_post(&s->volume_event);
+  }
   if (s->ep_fd>=0) { close(s->ep_fd); s->ep_fd=-1; }
   if (s->worker_started) { pthread_join(s->volume_thread,NULL); s->worker_started=0; }
+  if (s->sem_initialized) { sem_destroy(&s->volume_event); s->sem_initialized=0; }
   if (s->ctl_fd>=0 && s->configured) set_mute(s,1);
   if (s->ctl_fd>=0) {
     if (s->configured) set_alt(s,0);
