@@ -7,6 +7,9 @@ typedef struct {
   atomic_int stop,fatal;
   atomic_uint epoch,request_generation,active_generation;
   atomic_ulong overruns,dropped;
+  atomic_uint request_frames,poll_us,adaptive;
+  atomic_uint read_min,read_max,gap_max_us;
+  atomic_ulong reads,empty,frames,gap_sum_us,gaps;
   eng_ring ring;
 } source_t;
 int source_start(source_t *s);

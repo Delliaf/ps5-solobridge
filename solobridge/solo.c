@@ -149,7 +149,7 @@ static int clock_rate(solo_t *s,int write) {
   }
   return 0;
 }
-int solo_open(solo_t *s,int verbose,int volume,unsigned batch) {
+int solo_open(solo_t *s,int verbose,int volume,unsigned batch,unsigned slots) {
   memset(s,0,sizeof(*s)); s->ctl_fd=s->ep_fd=-1;
   s->hw=(hw_volume_state){-1,-1};
   atomic_init(&s->volume_wanted,volume|HOLD_MUTE); atomic_init(&s->volume_done,-1);
@@ -175,7 +175,7 @@ int solo_open(solo_t *s,int verbose,int volume,unsigned batch) {
   what="clock validity"; if (clock_valid(s)<0) goto fail;
   char path[40]; snprintf(path,sizeof(path),"/dev/usb/%d.%d.1",s->bus,s->addr);
   s->batch=batch;
-  if(batch){what="USB_FS setup";if(fs_setup(&s->fs,s->ctl_fd,batch)<0)goto fail;}
+  if(batch){what="USB_FS setup";if(fs_setup(&s->fs,s->ctl_fd,batch,slots)<0)goto fail;}
   else {what=path; s->ep_fd=open(path,O_WRONLY|O_NONBLOCK);if(s->ep_fd<0)goto fail;}
   what="initial hardware volume"; if (apply_volume(s,volume|TTGK_MUTE)<0) goto fail;
   if (sem_init(&s->volume_event,0,0)==0) { s->sem_initialized=1; atomic_store(&s->event_ok,1); }

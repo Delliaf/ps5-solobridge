@@ -14,6 +14,7 @@
 #define ENG_AHEAD 48.0
 #define ENG_Q 65536
 typedef struct { float l,r; } eng_frame;
+_Static_assert(sizeof(eng_frame)==2*sizeof(float),"packed stereo float");
 typedef struct {
   atomic_uint_fast64_t rd,wr;
   eng_frame data[ENG_RING];
@@ -32,7 +33,10 @@ static inline size_t eng_push(eng_ring *r,const float *src,size_t n) {
   uint64_t d=atomic_load_explicit(&r->rd,memory_order_acquire);
   size_t free_n=ENG_RING-(size_t)(w-d);
   if (n>free_n) n=free_n;
-  for (size_t i=0;i<n;i++) r->data[(w+i)&(ENG_RING-1)]=(eng_frame){src[i*2],src[i*2+1]};
+  size_t offset=(size_t)(w&(ENG_RING-1)),first=ENG_RING-offset;
+  if(first>n)first=n;
+  if(first)memcpy(r->data+offset,src,first*sizeof(eng_frame));
+  if(n>first)memcpy(r->data,src+2*first,(n-first)*sizeof(eng_frame));
   atomic_store_explicit(&r->wr,w+n,memory_order_release);
   return n;
 }
@@ -44,13 +48,15 @@ static inline void eng_discard(eng_ring *r,size_t n) {
 }
 typedef struct {
   int playing,phase,delta,fade;
-  unsigned target,window,min_fill,stable;
+  unsigned target,window,min_fill,stable,floor,record;
+  int trim_prime;
   uint64_t underruns,skipped,packets,silent;
   eng_frame last,from;
 } eng_player;
 static inline void eng_player_init(eng_player *p) {
-  memset(p,0,sizeof(*p)); p->target=192; p->min_fill=ENG_RING;
+  memset(p,0,sizeof(*p)); p->target=p->floor=192; p->record=ENG_RECORD; p->min_fill=ENG_RING;
 }
+static inline void eng_profile(eng_player *p,unsigned record,unsigned reserve,int trim){p->record=record;p->target=p->floor=reserve;p->trim_prime=trim;}
 static inline void eng_reset(eng_ring *r,eng_player *p) {
   eng_discard(r,eng_fill(r));
   p->playing=p->phase=p->delta=0;
@@ -85,12 +91,14 @@ static inline eng_frame eng_fade(eng_player *p,eng_frame f) {
  * with interpolation instead of abrupt frame deletion/duplication. */
 static inline void eng_packet(eng_ring *r,eng_player *p,uint8_t out[ENG_BYTES]) {
   size_t fill=eng_fill(r);
-  if (!p->playing && fill>=ENG_RECORD+p->target+2) {
+  if (!p->playing && fill>=p->record+p->target+2) {
+    /* At startup only, discard already stale, still muted pre-roll. */
+    if(p->trim_prime){size_t keep=p->record+p->target+2;eng_discard(r,fill-keep);fill=keep;}
     p->playing=1; p->phase=p->delta=0; p->window=0; p->min_fill=ENG_RING;
     eng_transition(p);
   }
   if (p->playing && fill>4096) {
-    size_t skip=fill-(ENG_RECORD+p->target);
+    size_t skip=fill-(p->record+p->target);
     eng_discard(r,skip); p->skipped+=skip; fill-=skip;
     p->phase=p->delta=0; p->window=0; p->min_fill=ENG_RING; eng_transition(p);
   }
@@ -115,7 +123,7 @@ static inline void eng_packet(eng_ring *r,eng_player *p,uint8_t out[ENG_BYTES]) 
     if (want< -164) want=-164;
     p->delta=(3*p->delta+want)/4;
     if (++p->stable>=120) {
-      if (p->target>192) p->target-=96;
+      if (p->target>p->floor) p->target-=96;
       p->stable=0;
     }
     p->window=0; p->min_fill=ENG_RING;

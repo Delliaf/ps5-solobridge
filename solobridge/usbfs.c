@@ -2,14 +2,14 @@
 #include "log.h"
 #include <errno.h>
 #include <string.h>
-int fs_setup(usbfs *f,int fd,unsigned n) {
+int fs_setup(usbfs *f,int fd,unsigned n,unsigned slots) {
   memset(f,0,sizeof(*f));
-  if(n!=16&&n!=32&&n!=64){errno=EINVAL;return -1;}
+  if((n!=8&&n!=16&&n!=24&&n!=32&&n!=64)||(slots!=2&&slots!=3)){errno=EINVAL;return -1;}
   f->n=n;
-  fs_init init={.pEndpoints=f->ep,.ep_index_max=FS_SLOTS};
+  fs_init init={.pEndpoints=f->ep,.ep_index_max=slots};
   if(ioctl(fd,FS_INIT,&init)<0){log_line("USB_FS INIT errno=%d",errno);return -1;}
   f->initialized=1;
-  for(unsigned i=0;i<FS_SLOTS;i++){
+  for(unsigned i=0;i<slots;i++){
     fs_open o={.max_bufsize=n*288,.max_frames=n,.ep_index=i,.ep_no=1};
     if(ioctl(fd,FS_OPEN,&o)<0){log_line("USB_FS OPEN slot=%u errno=%d",i,errno);return -1;}
     f->opened++;

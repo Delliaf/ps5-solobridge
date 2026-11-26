@@ -35,7 +35,7 @@
 static atomic_int active,quit,economy_mode=1;
 static atomic_int bench_cmd,bench_running;
 static pthread_mutex_t bench_lock=PTHREAD_MUTEX_INITIALIZER;
-static char bench_text[8192];
+static char bench_text[16384];
 static size_t bench_len;
 int web_bench_command(void){return atomic_load(&bench_cmd)?atomic_exchange(&bench_cmd,0):0;}
 void web_bench_line(const char *fmt,...){
@@ -48,7 +48,7 @@ void web_bench_line(const char *fmt,...){
 }
 void web_bench_begin(void){
   pthread_mutex_lock(&bench_lock);bench_len=0;bench_text[0]=0;pthread_mutex_unlock(&bench_lock);
-  web_bench_line("TTGK v%s pid=%d benchmark: economy write, USB_FS 16/32/64; 5s warmup, 25s measured; CPU relative to one core",TTGK_VERSION,getpid());
+  web_bench_line("TTGK v%s pid=%d latency benchmark: 11 profiles; queue metrics are estimates, not end-to-end latency; 5s warmup, 25s measured; CPU relative to one core",TTGK_VERSION,getpid());
 }
 void web_bench_end(void){atomic_store(&bench_running,0);}
 
@@ -148,9 +148,9 @@ static void status(int fd) {
   int fresh=atomic_load(&snapshot_done)==ticket;
   web_audio a; pthread_mutex_lock(&lock);a=audio;pthread_mutex_unlock(&lock);
   char b[2048];
-  int n=snprintf(b,sizeof(b),"{\"version\":\"%s\",\"pid\":%d,\"fresh\":%d,\"notification_result\":%d,\"usb\":%d,\"capture\":%d,\"playing\":%d,\"gate\":%d,\"hw\":%d,\"desired\":%d,\"verified\":%d,\"limit\":%d,\"online\":%d,\"ring\":%d,\"phase_ppm\":%d,\"queue\":%.2f,\"underruns\":%llu,\"late\":%llu,\"blocked\":%llu,\"reconnects\":%llu,\"source_drop\":%llu,\"skipped\":%llu,\"writes\":%llu,\"economy\":%d,\"cpu_valid\":%d,\"cpu_user\":%.3f,\"cpu_sys\":%.3f,\"write_rate\":%.1f,\"loop_rate\":%.1f,\"sleep_rate\":%.1f,\"perf_seconds\":%.3f,\"batch\":%u,\"benchmark_running\":%d}",
+  int n=snprintf(b,sizeof(b),"{\"version\":\"%s\",\"pid\":%d,\"fresh\":%d,\"notification_result\":%d,\"usb\":%d,\"capture\":%d,\"playing\":%d,\"gate\":%d,\"hw\":%d,\"desired\":%d,\"verified\":%d,\"limit\":%d,\"online\":%d,\"ring\":%d,\"phase_ppm\":%d,\"queue\":%.2f,\"underruns\":%llu,\"late\":%llu,\"blocked\":%llu,\"reconnects\":%llu,\"source_drop\":%llu,\"skipped\":%llu,\"writes\":%llu,\"economy\":%d,\"cpu_valid\":%d,\"cpu_user\":%.3f,\"cpu_sys\":%.3f,\"write_rate\":%.1f,\"loop_rate\":%.1f,\"sleep_rate\":%.1f,\"perf_seconds\":%.3f,\"batch\":%u,\"slots\":%u,\"read_min\":%u,\"read_max\":%u,\"gap_max_us\":%u,\"benchmark_running\":%d}",
     TTGK_VERSION,getpid(),fresh,control_notification_result(),a.usb,a.capture,a.playing,a.gate,a.hw,control_volume(),control_verified(),control_limit(),control_online(),a.ring,a.phase,a.queue,
-    (unsigned long long)a.underruns,(unsigned long long)a.late,(unsigned long long)a.blocked,(unsigned long long)a.reconnects,(unsigned long long)a.source_drop,(unsigned long long)a.skipped,(unsigned long long)a.writes,web_get_economy(),a.perf.valid,a.perf.user_pct,a.perf.sys_pct,a.perf.write_rate,a.perf.loop_rate,a.perf.sleep_rate,a.perf.seconds,a.batch,atomic_load(&bench_running));
+    (unsigned long long)a.underruns,(unsigned long long)a.late,(unsigned long long)a.blocked,(unsigned long long)a.reconnects,(unsigned long long)a.source_drop,(unsigned long long)a.skipped,(unsigned long long)a.writes,web_get_economy(),a.perf.valid,a.perf.user_pct,a.perf.sys_pct,a.perf.write_rate,a.perf.loop_rate,a.perf.sleep_rate,a.perf.seconds,a.batch,a.slots,a.read_min,a.read_max,a.gap_max_us,atomic_load(&bench_running));
   if(n<0||(size_t)n>=sizeof(b))plain(fd,503,"status unavailable");else response(fd,200,"application/json",b,(size_t)n);
 }
 static void logs(int fd,const char *path,size_t max) {

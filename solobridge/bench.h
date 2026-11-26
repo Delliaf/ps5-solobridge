@@ -3,8 +3,22 @@
 #include <stdint.h>
 #include <stdio.h>
 #include "perf.h"
-#define BENCH_MODES 4
-static const unsigned bench_modes[BENCH_MODES]={0,16,32,64};
+typedef struct {unsigned batch,slots,request,reserve,poll,adaptive,trim,efficient;} bench_profile;
+static const bench_profile bench_modes[]={
+  {0,3,1024,192,2000,0,0,0},
+  {64,3,1024,192,2000,0,0,0},
+  {32,2,1024,96,2000,0,1,1},
+  {24,2,1024,96,2000,0,1,1},
+  {16,2,1024,96,2000,0,1,1},
+  {8,2,1024,96,2000,0,1,1},
+  {16,2,512,96,1000,0,1,1},
+  {16,2,256,96,1000,0,1,1},
+  {16,2,128,96,500,0,1,1},
+  {16,2,1024,96,500,0,1,1},
+  {16,2,1024,96,2000,1,1,1}
+};
+#define BENCH_MODES (sizeof(bench_modes)/sizeof(bench_modes[0]))
+typedef struct {uint64_t reads,empty,frames,gaps,gap_us;unsigned min,max,gap_max;} capture_stats;
 typedef struct {perf_sample cpu;uint64_t packets,underruns,skipped,late,blocked,drop,overruns,reconnects,fs_calls;unsigned epoch;} bench_sample;
 static inline int bench_pass(bench_sample a,bench_sample b,unsigned batch){
   double dt=b.cpu.at-a.cpu.at;

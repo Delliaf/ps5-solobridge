@@ -22,7 +22,7 @@ typedef struct {
   atomic_int volume_wanted,volume_done,volume_stop,volume_error;
   atomic_uint_fast64_t volume_busy_ms;
 } solo_t;
-int solo_open(solo_t *s,int verbose,int volume,unsigned batch);
+int solo_open(solo_t *s,int verbose,int volume,unsigned batch,unsigned slots);
 void solo_request_volume(solo_t *s,int volume,int ready);
 int solo_volume_done(solo_t *s);
 int solo_volume_raw(solo_t *s);

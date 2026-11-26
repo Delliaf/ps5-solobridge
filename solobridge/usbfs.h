@@ -29,7 +29,7 @@ typedef struct {
   int initialized;
   uint64_t calls,submitted,completed;
 } usbfs;
-int fs_setup(usbfs *f,int fd,unsigned n);
+int fs_setup(usbfs *f,int fd,unsigned n,unsigned slots);
 int fs_submit(usbfs *f,int fd,unsigned slot);
 int fs_complete(usbfs *f,int fd);
 int fs_cleanup(usbfs *f,int fd);
