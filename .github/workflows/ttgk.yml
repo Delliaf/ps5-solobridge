@@ -1,0 +1,29 @@
+name: TTGK build and tests
+on:
+  push:
+    branches: [ttgk-audio]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  host-tests:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          cc -std=c11 -Wall -Wextra -Werror -O2 -fsanitize=undefined,address -fno-omit-frame-pointer tests/test_logic.c -o /tmp/ttgk-tests
+          /tmp/ttgk-tests
+  ps5-build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t ttgk-sdk .
+      - run: docker run --rm -v "$PWD:/work" ttgk-sdk make -C solobridge
+      - run: sha256sum solobridge/solobridge.elf
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ttgk-audio-experimental
+          path: solobridge/solobridge.elf
+          if-no-files-found: error
