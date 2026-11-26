@@ -1,0 +1,59 @@
+name: TTGK build and tests
+on:
+  push:
+    branches: [ttgk-audio]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  host-tests:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          cc -std=c11 -Wall -Wextra -Werror -O2 -fsanitize=undefined,address -fno-omit-frame-pointer tests/test_logic.c -o /tmp/ttgk-tests
+          /tmp/ttgk-tests
+          cc -std=c11 -Wall -Wextra -Werror -O2 -fsanitize=undefined,address -fno-omit-frame-pointer tests/test_engine.c -o /tmp/ttgk-engine
+          /tmp/ttgk-engine
+          cc -std=c11 -Wall -Wextra -Werror -O2 -fsanitize=undefined,address -fno-omit-frame-pointer tests/test_volume.c -o /tmp/ttgk-volume
+          /tmp/ttgk-volume
+          cc -std=c11 -Wall -Wextra -Werror -O2 -pthread -fsanitize=undefined,address -fno-omit-frame-pointer tests/test_stream.c -o /tmp/ttgk-stream
+          /tmp/ttgk-stream
+          cc -std=c11 -Wall -Wextra -Werror -O2 -fsanitize=undefined,address -fno-omit-frame-pointer tests/test_probe.c -o /tmp/ttgk-probe
+          /tmp/ttgk-probe
+          root=$(mktemp -d)
+          trap 'rm -rf "$root"' EXIT
+          cc -std=gnu11 -Wall -Wextra -Werror -O2 -pthread -fsanitize=undefined,address -fno-omit-frame-pointer -DPROBE_ROOT=\"$root\" tests/test_probe_runtime.c solobridge/probe.c -o /tmp/ttgk-probe-runtime
+          /tmp/ttgk-probe-runtime
+          cc -std=gnu11 -Wall -Wextra -Werror -O2 -pthread -fsanitize=undefined,address -fno-omit-frame-pointer -DWEB_ROOT=\"$root\" -DWEB_PORT=19160 tests/web_harness.c solobridge/web.c -o /tmp/ttgk-web
+          python3 tests/test_web.py "$root" 19160 /tmp/ttgk-web
+          cc -std=gnu11 -Wall -Wextra -Werror -O2 -pthread -fsanitize=undefined,address -fno-omit-frame-pointer -DCONTROL_ROOT=\"$root\" tests/test_control.c solobridge/control.c -o /tmp/ttgk-control
+          /tmp/ttgk-control
+          cc -std=gnu11 -Wall -Wextra -Werror -O2 -fsanitize=undefined,address -fno-omit-frame-pointer tests/test_usbfs.c solobridge/usbfs.c -o /tmp/ttgk-usbfs
+          /tmp/ttgk-usbfs
+          python3 -c 'import json,pathlib; s=pathlib.Path("solobridge/web_page.h").read_text(); h="".join(json.loads(l.rstrip(";")) for l in s.splitlines() if l.startswith(chr(34))); pathlib.Path("/tmp/ttgk-ui.js").write_text(h.split("<script>")[1].split("</script>")[0])'
+          node --check /tmp/ttgk-ui.js
+      - run: |
+          python3 -m venv /tmp/ttgk-analyzer
+          /tmp/ttgk-analyzer/bin/pip install numpy
+          /tmp/ttgk-analyzer/bin/python tests/test_compare_tempest.py
+          /tmp/ttgk-analyzer/bin/python tests/test_latency.py
+  ps5-build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t ttgk-sdk .
+      - run: docker run --rm -v "$PWD:/work" ttgk-sdk make -C solobridge
+      - run: |
+          version=$(sed -n 's/^#define TTGK_VERSION "\(.*\)"/\1/p' solobridge/version.h)
+          test -n "$version"
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+          cp solobridge/solobridge.elf "solobridge/solobridge-v$version.elf"
+          sha256sum "solobridge/solobridge-v$version.elf"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ttgk-audio-v${{ env.VERSION }}
+          path: solobridge/solobridge-v*.elf
+          if-no-files-found: error

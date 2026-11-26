@@ -8,7 +8,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 ENV LLVM_CONFIG=/usr/bin/llvm-config-18
-RUN wget -q https://github.com/ps5-payload-dev/sdk/releases/latest/download/ps5-payload-sdk.zip -O /tmp/sdk.zip \
+RUN wget -q https://github.com/ps5-payload-dev/sdk/releases/download/v0.50/ps5-payload-sdk.zip -O /tmp/sdk.zip \
+    && echo '2993a69e52fea04a32bf1753318fc60b3f918ab635bdf946870e7d1849557bb2  /tmp/sdk.zip' | sha256sum -c - \
     && unzip -q -d /opt /tmp/sdk.zip \
     && rm /tmp/sdk.zip
 

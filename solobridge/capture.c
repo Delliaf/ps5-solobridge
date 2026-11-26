@@ -3,6 +3,7 @@
 // NID, layout dei parametri e codici di errore vengono da li'.
 
 #include "capture.h"
+#include "log.h"
 
 #include <ps5/kernel.h>
 
@@ -66,7 +67,7 @@ long capture_overruns(void) {
 static void *resolve(int mod, const char *nid, const char *name) {
   intptr_t p = kernel_dynlib_resolve(getpid(), (uint32_t)mod, nid);
   if (!p)
-    printf("capture: %s (%s) non trovata\n", name, nid);
+    log_line("capture: %s (%s) non trovata", name, nid);
   return (void *)p;
 }
 
@@ -98,26 +99,34 @@ static int start_capture(void) {
   if (r < 0) goto fail;
 
   g_started = 1;
-  printf("capture: attiva, %d Hz stereo\n", CAPTURE_RATE);
+  log_line("capture: attiva, %d Hz stereo", CAPTURE_RATE);
   return 1;
 
 fail:
-  printf("capture: %s -> %#x\n", what, (unsigned)r);
+  log_line("capture: %s -> %#x", what, (unsigned)r);
   capture_close();
   return 0;
 }
 
+static int load_module(const char *path) {
+  const char *base=strrchr(path,'/'); base=base?base+1:path;
+  uint32_t h=0; int res=0;
+  if (kernel_dynlib_handle(getpid(),base,&h)==0 && h) return (int)h;
+  int r=sceKernelLoadStartModule(path,0,NULL,0,NULL,&res);
+  if (r<0 && kernel_dynlib_handle(getpid(),base,&h)==0 && h) return (int)h;
+  return r;
+}
 int capture_open(void) {
-  int mod, res = 0, r;
+  int mod,r;
 
-  r = sceKernelLoadStartModule(IPMI_PATH, 0, NULL, 0, NULL, &res);
+  r = load_module(IPMI_PATH);
   if (r < 0) {
-    printf("capture: load %s -> %#x\n", IPMI_PATH, (unsigned)r);
+    log_line("capture: load %s -> %#x", IPMI_PATH, (unsigned)r);
     return -1;
   }
-  mod = sceKernelLoadStartModule(LIB_PATH, 0, NULL, 0, NULL, &res);
+  mod = load_module(LIB_PATH);
   if (mod < 0) {
-    printf("capture: load %s -> %#x\n", LIB_PATH, (unsigned)mod);
+    log_line("capture: load %s -> %#x", LIB_PATH, (unsigned)mod);
     return -1;
   }
 
@@ -150,11 +159,11 @@ int capture_read(float *buf, size_t size) {
   }
   if (r < 0) {
     // 0x81950008: il servizio ha chiuso la sessione (es. gioco chiuso)
-    printf("capture: ReadAudio -> %#x\n", (unsigned)r);
+    log_line("capture: ReadAudio -> %#x", (unsigned)r);
     return -1;
   }
   if ((size_t)r > size || (size_t)r % (sizeof(float) * CAPTURE_CHANNELS)) {
-    printf("capture: lunghezza ReadAudio non valida: %d\n", r);
+    log_line("capture: lunghezza ReadAudio non valida: %d", r);
     return -1;
   }
   return r;
