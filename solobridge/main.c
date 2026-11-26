@@ -14,6 +14,7 @@
 #include "source.h"
 #include "engine.h"
 #include "log.h"
+#include "probe.h"
 #define DIR "/data/solobridge"
 static volatile sig_atomic_t running=1;
 static void stop_signal(int s) { (void)s; running=0; }
@@ -32,8 +33,11 @@ int main(void) {
   if (log_start()<0) { close(lock); return 1; }
   log_line("TTGK v2: started pid=%d; no network listener",getpid());
   if (control_start()<0) { log_line("control worker failed"); log_stop(); close(lock); return 1; }
+  int probe=probe_start();
+  if (probe<0) log_line("Tempest probe init failed; normal bridge remains available");
+  else if (probe) log_line("Tempest diagnostic enabled (explicit source capture only)");
   static source_t src;
-  if (source_start(&src)<0) { log_line("capture worker failed"); control_stop(); log_stop(); close(lock); return 1; }
+  if (source_start(&src)<0) { log_line("capture worker failed"); probe_stop(); control_stop(); log_stop(); close(lock); return 1; }
   solo_t solo; int online=0,result=0,have=0,gate=0,ack=-1;
   double next_open=0,next_stats=now_sec()+30,blocked_since=0,ready_since=0,last_tick=now_sec();
   unsigned epoch=0;
@@ -123,6 +127,6 @@ int main(void) {
   }
   control_disconnected(0); source_enable(&src,0);
   if (online) solo_close(&solo);
-  source_stop(&src); control_stop(); log_line("TTGK stopped result=%d",result);
+  source_stop(&src); probe_stop(); control_stop(); log_line("TTGK stopped result=%d",result);
   log_stop(); close(lock); return result;
 }

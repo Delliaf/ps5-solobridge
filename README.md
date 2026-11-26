@@ -68,3 +68,7 @@ Host tests also exercise ring overflow, prebuffer, underrun, PCM packet packing,
 The hardware transaction tests use mocked verified USB operations to check mute-before-level, no redundant requests, stale-unmute prevention and partial channel failures. A 500 ms control watchdog closes the streaming endpoint on a slow transaction; teardown cannot forcibly cancel undocumented or blocked kernel calls. File commands have a separate worker from DualSense; shutdown may wait for a stuck system API after audio has been stopped.
 
 Volume requests normally wake the hardware worker using a POSIX semaphore (timed/polling fallback); no periodic USB control traffic is generated when volume and playback state are unchanged. Capture generations prevent a late start from an old USB session being treated as current. Host tests include concurrent ring wrap-around and simulated ±500 ppm drift over 60 seconds; these do not substitute for USB hardware measurements.
+
+## TV Tempest and native DualSense room measurement (experimental verification)
+
+See [TV_TEMPEST.md](docs/TV_TEMPEST.md) for the actual native setup and opt-in A/B and calibration signal capture. This is diagnostic support only: the source is still AVCAP Remote Play, and native TV Tempest/measurement propagation through it is not confirmed. No microphone capture, fake surround, kernel patches or additional network services. Disabled by default.

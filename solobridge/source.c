@@ -3,6 +3,7 @@
 #include "capture.h"
 #include "control.h"
 #include "log.h"
+#include "probe.h"
 #include <time.h>
 #include <unistd.h>
 static double seconds(void) {
@@ -10,6 +11,7 @@ static double seconds(void) {
   return t.tv_sec+t.tv_nsec/1e9;
 }
 static void inactive(source_t *s) {
+  probe_discontinuity();
   atomic_store(&s->active_generation,0);
   atomic_fetch_add(&s->epoch,1);
   capture_close();
@@ -46,11 +48,13 @@ static void *run(void *arg) {
       if (n<=0) break;
       if (atomic_load(&s->request_generation)!=generation) break;
       size_t frames=(size_t)n/(sizeof(float)*CAPTURE_CHANNELS);
+      probe_feed(rec,frames);
       size_t put=eng_push(&s->ring,rec,frames);
       if (put<frames) atomic_fetch_add(&s->dropped,frames-put);
       last=seconds();
     }
     if (capture_overruns()!=old) {
+      probe_discontinuity();
       overrun=1; atomic_store(&s->overruns,(unsigned long)capture_overruns());
       atomic_fetch_add(&s->epoch,1);
     }

@@ -21,6 +21,8 @@ jobs:
           /tmp/ttgk-volume
           cc -std=c11 -Wall -Wextra -Werror -O2 -pthread -fsanitize=undefined,address -fno-omit-frame-pointer tests/test_stream.c -o /tmp/ttgk-stream
           /tmp/ttgk-stream
+          cc -std=c11 -Wall -Wextra -Werror -O2 -fsanitize=undefined,address -fno-omit-frame-pointer tests/test_probe.c -o /tmp/ttgk-probe
+          /tmp/ttgk-probe
   ps5-build:
     runs-on: ubuntu-24.04
     steps:
