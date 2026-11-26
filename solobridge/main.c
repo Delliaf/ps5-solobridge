@@ -79,11 +79,14 @@ int main(void) {
       web_bench_begin();web_set_economy(1);
       if(online){control_disconnected(0);source_enable(&src,0);solo_close(&solo);online=0;late_total+=pace.late;blocked_total+=pace.blocked;}
       next_open=now_sec();
-    } else if(command==2&&test>=0){
+    } else if(command==2){
+      if(test<0){web_bench_begin();web_bench_line("CANCELLED before startup");web_bench_end();}
+      else {
       web_bench_line("CANCELLED; restoring normal USB write");
       web_bench_end();test=-1;batch=0;
       if(online){control_disconnected(0);source_enable(&src,0);solo_close(&solo);online=0;late_total+=pace.late;blocked_total+=pace.blocked;}
       next_open=now_sec();
+      }
     }
     int mode=web_get_economy();
     if(mode!=economy){economy=mode; previous=perf_take(now,writes,loops,sleeps);rate=(perf_rate){0};next_perf=now+5;log_line("pacing mode=%s",economy?"economy":"legacy");}
@@ -166,7 +169,7 @@ int main(void) {
       /* Keep hardware muted until capture is prebuffered and packets accepted.
        * Gate is also removed on session loss and underrun. */
       double t=now_sec();
-      if (cap && player.playing && !failed && !blocked_since && (!batch||solo.fs.completed)) {
+      if (cap && source_active(&src) && atomic_load(&src.epoch)==epoch && player.playing && !failed && !blocked_since && (!batch||solo.fs.completed)) {
         if (!ready_since) ready_since=t;
         if (t-ready_since>=0.004) gate=1;
       } else { ready_since=0; gate=0; }
@@ -198,7 +201,7 @@ int main(void) {
       bench_sample cur={.cpu={0},.packets=packets,.underruns=player.underruns,.skipped=player.skipped,.late=late_total+(online?pace.late:0),.blocked=blocked_total+(online?pace.blocked:0),.drop=atomic_load(&src.dropped),.overruns=atomic_load(&src.overruns),.reconnects=reconnects,.fs_calls=fs_calls,.epoch=atomic_load(&src.epoch)};
       if(failed){web_bench_line("mode=%u FAIL stream/setup error",batch);finish=1;}
       else if(!measuring){
-        if(online&&gate&&source_active(&src)){
+        if(online&&gate&&source_active(&src)&&solo_volume_done(&solo)>=0){
           if(!stable_at)stable_at=now;
           if(now-stable_at>=5){cur.cpu=perf_take(now,writes,loops,sleeps);start=cur;measuring=1;web_bench_line("mode=%u measuring 25s",batch);}
         }else stable_at=0;
@@ -213,14 +216,14 @@ int main(void) {
       if(finish){
         if(online){control_disconnected(0);source_enable(&src,0);solo_close(&solo);online=0;late_total+=pace.late;blocked_total+=pace.blocked;}
         test++;measuring=0;stable_at=0;phase_at=now_sec();next_open=phase_at;
-        if(test>=BENCH_MODES){test=-1;batch=0;web_bench_line("FINISHED; restored normal USB write. Confirm sound manually.");web_bench_end();}
+        if(test>=BENCH_MODES){test=-1;batch=0;web_bench_line("FINISHED; normal USB write requested. Confirm sound manually.");web_bench_end();}
         else {batch=bench_modes[test];web_bench_line("mode=%u starting",batch);}
         previous=perf_take(now_sec(),writes,loops,sleeps);rate=(perf_rate){0};next_perf=previous.at+5;
       }
     }
     if(now>=next_perf){perf_sample sample=perf_take(now,writes,loops,sleeps);rate=perf_diff(previous,sample);previous=sample;next_perf=now+5;}
     if (web_snapshot_requested()) {
-      web_audio s={online,source_active(&src),player.playing,online&&gate,online?solo_volume_raw(&solo):-1,(int)eng_fill(&src.ring),player.delta*1000000/ENG_Q,pace.queued,player.underruns,late_total+(online?pace.late:0),blocked_total+(online?pace.blocked:0),reconnects,atomic_load(&src.dropped),player.skipped,writes,rate,batch};
+      web_audio s={online,source_active(&src),player.playing,online&&gate,online?solo_volume_raw(&solo):-1,(int)eng_fill(&src.ring),player.delta*1000000/ENG_Q,(online&&batch?(double)(__builtin_popcount(solo.fs.busy)*batch):pace.queued),player.underruns,late_total+(online?pace.late:0),blocked_total+(online?pace.blocked:0),reconnects,atomic_load(&src.dropped),player.skipped,writes,rate,batch};
       web_publish(&s);
     }
     if (now>=next_stats) {

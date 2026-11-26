@@ -37,7 +37,7 @@ static atomic_int bench_cmd,bench_running;
 static pthread_mutex_t bench_lock=PTHREAD_MUTEX_INITIALIZER;
 static char bench_text[8192];
 static size_t bench_len;
-int web_bench_command(void){return atomic_exchange(&bench_cmd,0);}
+int web_bench_command(void){return atomic_load(&bench_cmd)?atomic_exchange(&bench_cmd,0):0;}
 void web_bench_line(const char *fmt,...){
   char line[768];va_list ap;va_start(ap,fmt);vsnprintf(line,sizeof(line),fmt,ap);va_end(ap);
   log_line("benchmark: %s",line);

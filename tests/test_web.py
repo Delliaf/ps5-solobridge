@@ -44,6 +44,18 @@ try:
     assert json.loads(req("GET","/api/status"))["economy"]==0
     req("POST","/api/pacing/economy")
     assert json.loads(req("GET","/api/status"))["economy"]==1
+    req("POST","/api/benchmark/start")
+    time.sleep(.1)
+    assert json.loads(req("GET","/api/status"))["benchmark_running"]==1
+    req("POST","/api/benchmark/start",True,409)
+    req("POST","/api/pacing/legacy",True,409)
+    req("POST","/api/web/disable",True,409)
+    assert not (root/"disable_web").exists()
+    assert b"mock result" in req("GET","/api/benchmark/report")
+    req("POST","/api/benchmark/cancel")
+    time.sleep(.1)
+    assert b"CANCELLED" in req("GET","/api/benchmark/report")
+    assert json.loads(req("GET","/api/status"))["benchmark_running"]==0
     req("POST","/api/notification/test")
     req("POST","/api/trace/on",True,404)
     with socket.create_connection(("127.0.0.1",port),timeout=2) as slow:

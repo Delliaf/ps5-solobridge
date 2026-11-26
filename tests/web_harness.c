@@ -29,6 +29,6 @@ int main(void){
   for(int i=0;i<500&&!web_active();i++)usleep(10000);
   if(!web_active()){web_stop();return 3;}
   puts("ready");fflush(stdout);
-  while(web_active()&&!control_stop_requested()&&!external_stop){if(web_snapshot_requested())web_publish(&a);usleep(10000);}
+  while(web_active()&&!control_stop_requested()&&!external_stop){int cmd=web_bench_command();if(cmd==1){web_bench_begin();web_bench_line("mode=0 mock result");}else if(cmd==2){web_bench_line("CANCELLED");web_bench_end();}if(web_snapshot_requested())web_publish(&a);usleep(10000);}
   web_stop();return control_stop_requested()?2:0;
 }

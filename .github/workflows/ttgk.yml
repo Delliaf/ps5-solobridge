@@ -31,6 +31,8 @@ jobs:
           python3 tests/test_web.py "$root" 19160 /tmp/ttgk-web
           cc -std=gnu11 -Wall -Wextra -Werror -O2 -pthread -fsanitize=undefined,address -fno-omit-frame-pointer -DCONTROL_ROOT=\"$root\" tests/test_control.c solobridge/control.c -o /tmp/ttgk-control
           /tmp/ttgk-control
+          cc -std=gnu11 -Wall -Wextra -Werror -O2 -fsanitize=undefined,address -fno-omit-frame-pointer tests/test_usbfs.c solobridge/usbfs.c -o /tmp/ttgk-usbfs
+          /tmp/ttgk-usbfs
           python3 -c 'import json,pathlib; s=pathlib.Path("solobridge/web_page.h").read_text(); h="".join(json.loads(l.rstrip(";")) for l in s.splitlines() if l.startswith(chr(34))); pathlib.Path("/tmp/ttgk-ui.js").write_text(h.split("<script>")[1].split("</script>")[0])'
           node --check /tmp/ttgk-ui.js
       - run: |
