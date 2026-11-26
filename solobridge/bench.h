@@ -15,14 +15,22 @@ static const bench_profile bench_modes[]={
   {32,3,1024,96,2000,1,1,1,1,240},
   {16,3,1024,48,1000,1,1,1,1,240},
   {16,2,1024,96,2000,1,1,1,1,240},
-  {16,3,1024,96,1000,2,1,1,1,240}
+  {16,3,1024,96,1000,2,1,1,1,240},
+  {16,3,1024,96,1000,2,1,2,1,240}, /* 10: exact profile 9, drain completions */
+  {32,3,1024,96,2000,1,1,2,1,240}, /* 11: exact profile 6, drain completions */
+  {24,3,1024,96,1000,2,1,2,1,240}, /* 12: middle ground */
+  {16,2,1024,96,1000,2,1,2,1,336}, /* 13: lower USB queue, +2ms initial guard */
+  {24,2,1024,96,1000,2,1,2,1,336}  /* 14: balanced two slots */
 };
 #define BENCH_MODES (sizeof(bench_modes)/sizeof(bench_modes[0]))
 #define BENCH_WARMUP 8
+/* Keep prior profile numbers selectable, retest only useful controls and new candidates. */
+static const unsigned bench_order[]={9,6,10,11,12,13,14};
+#define BENCH_COUNT (sizeof(bench_order)/sizeof(bench_order[0]))
 #define BENCH_SECONDS 45
 static inline unsigned bench_id(unsigned step){
-  unsigned i=step%BENCH_MODES;
-  return (step/BENCH_MODES)%2?BENCH_MODES-1-i:i;
+  unsigned i=step%BENCH_COUNT;
+  return bench_order[(step/BENCH_COUNT)%2?BENCH_COUNT-1-i:i];
 }
 static inline int profile_valid(unsigned i){return i<BENCH_MODES;}
 /* Stream rate guard uses two consecutive bad windows, not a single jittery

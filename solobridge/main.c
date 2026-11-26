@@ -101,9 +101,9 @@ int main(void) {
       if(online){control_disconnected(0);source_enable(&src,0);solo_close(&solo);online=0;late_total+=pace.late;blocked_total+=pace.blocked;}
       next_open=now_sec();web_set_economy(1);previous=perf_take(next_open,writes,loops,sleeps);next_perf=next_open+5;rate=(perf_rate){0};perf_fs_base=fs_calls;perf_packets_base=packets;perf_empty_base=empty_wakes;fs_rate=packet_rate=empty_rate=0;log_line("selected playback profile=%u",selected);
     }else if((command==1||command==3)&&test<0){
-      rounds=command==3?1:2;test=0;active_profile=0;profile=bench_modes[0];batch=0;measuring=0;phase_at=now;stable_at=0;
+      rounds=command==3?1:2;test=0;active_profile=bench_id(0);profile=bench_modes[active_profile];batch=profile.batch;measuring=0;phase_at=now;stable_at=0;
       phase_under=player.underruns;phase_skip=player.skipped;phase_drop=atomic_load(&src.dropped);phase_over=atomic_load(&src.overruns);phase_preroll=player.preroll;
-      web_bench_begin();web_bench_line("rounds=%u profiles=%zu; warmup=%d measurement=%ds",rounds,BENCH_MODES,BENCH_WARMUP,BENCH_SECONDS);web_set_economy(1);
+      web_bench_begin();web_bench_line("rounds=%u profiles=%zu; warmup=%d measurement=%ds",rounds,BENCH_COUNT,BENCH_WARMUP,BENCH_SECONDS);web_set_economy(1);
       if(online){control_disconnected(0);source_enable(&src,0);solo_close(&solo);online=0;late_total+=pace.late;blocked_total+=pace.blocked;}
       next_open=now_sec();
     } else if(command==2){
@@ -157,7 +157,8 @@ int main(void) {
             sleeps++;int r=select(solo.ctl_fd+1,&rd,NULL,NULL,&tv);fs_calls++;
             if(r<0&&errno!=EINTR)failed=1;
             if(r>0){
-              for(unsigned i=0;i<(profile.efficient?1u:f->opened);i++){int v=fs_complete(f,solo.ctl_fd);if(v<0){failed=1;break;}if(!v)break;}
+              if(profile.efficient==2){if(fs_drain(f,solo.ctl_fd)<0)failed=1;}
+              else for(unsigned i=0;i<(profile.efficient?1u:f->opened);i++){int v=fs_complete(f,solo.ctl_fd);if(v<0){failed=1;break;}if(!v)break;}
               if(!failed&&f->completed==done_before){empty_wakes++;sleeps++;usleep(1000);}
             }else if(r==0){timeouts++;
             }
@@ -259,7 +260,7 @@ int main(void) {
       else if(!measuring){
         if(online&&gate&&source_active(&src)&&solo_volume_done(&solo)>=0){
           if(!stable_at)stable_at=now;
-          if(now-stable_at>=BENCH_WARMUP){cur.cpu=perf_take(now,writes,loops,sleeps);start=cur;cap_start=capture_snapshot(&src);main_cpu_valid=thread_cpu(&main_cpu_start);source_cpu_start=atomic_load(&src.cpu_ns);source_cpu_valid=atomic_load(&src.cpu_valid);qs=(queue_stats){0};ring_qs=(queue_stats){0};empty_start=empty_wakes;timeout_start=timeouts;head_sum=tail_sum=0;head_n=tail_n=0;qnext=now;measuring=1;web_bench_line("round=%u profile=%u batch=%u slots=%u request=%u reserve=%u prime=%u poll=%u adaptive=%u simd=%u measuring %ds",(unsigned)test/(unsigned)BENCH_MODES+1,active_profile,batch,profile.slots,profile.request,profile.reserve,profile.prime,profile.poll,profile.adaptive,profile.vector,BENCH_SECONDS);}
+          if(now-stable_at>=BENCH_WARMUP){cur.cpu=perf_take(now,writes,loops,sleeps);start=cur;cap_start=capture_snapshot(&src);main_cpu_valid=thread_cpu(&main_cpu_start);source_cpu_start=atomic_load(&src.cpu_ns);source_cpu_valid=atomic_load(&src.cpu_valid);qs=(queue_stats){0};ring_qs=(queue_stats){0};empty_start=empty_wakes;timeout_start=timeouts;head_sum=tail_sum=0;head_n=tail_n=0;qnext=now;measuring=1;web_bench_line("round=%u profile=%u batch=%u slots=%u request=%u reserve=%u prime=%u poll=%u adaptive=%u simd=%u completion=%u measuring %ds",(unsigned)test/(unsigned)BENCH_COUNT+1,active_profile,batch,profile.slots,profile.request,profile.reserve,profile.prime,profile.poll,profile.adaptive,profile.vector,profile.efficient,BENCH_SECONDS);}
         }else stable_at=0;
         if(now-phase_at>15&&!measuring){web_bench_line("mode=%u FAIL startup timeout",batch);finish=1;}
       }else if(!online||!gate||cur.epoch!=start.epoch){
@@ -279,14 +280,14 @@ int main(void) {
         web_bench_line("profile=%u capture_frames_min=%u max=%u mean_gap_ms=%.3f session_max_gap_ms=%.3f reads/s=%.1f empty/s=%.1f capture_frames/s=%.1f queue_sample_mean_ms=%.3f queue_sample_p95_upper_ms=%.3f queue_sample_max_ms=%.3f samples=%llu",active_profile,cs.min,cs.max,cg,cs.gap_max/1000.0,(cs.reads-cap_start.reads)/r.seconds,(cs.empty-cap_start.empty)/r.seconds,capture_rate,qs.n?qs.sum/qs.n:0,queue_p95(&qs),qs.max,(unsigned long long)qs.n);
         web_bench_line("profile=%u startup_underrun=%llu startup_skip=%llu startup_drop=%llu startup_overrun=%llu preroll_this_phase=%llu actual_reserve=%u queue_growth_ms=%.3f",active_profile,(unsigned long long)warm_under,(unsigned long long)warm_skip,(unsigned long long)warm_drop,(unsigned long long)warm_over,(unsigned long long)(player.preroll-phase_preroll),player.target,growth);
         web_bench_line("profile=%u ring_mean_ms=%.3f ring_p95_upper_ms=%.3f ring_max_ms=%.3f empty_wakes/s=%.1f select_timeouts/s=%.1f usb_inflight_upper_ms=%.3f",active_profile,ring_qs.n?ring_qs.sum/ring_qs.n:0,queue_p95(&ring_qs),ring_qs.max,(empty_wakes-empty_start)/r.seconds,(timeouts-timeout_start)/r.seconds,batch?batch*profile.slots/8.0:6.0);
-        web_bench_line("round=%u profile=%u mode=%u %s seconds=%.3f cpu_valid=%d cpu=%.3f user=%.3f sys=%.3f writes/s=%.1f fs_calls/s=%.1f loops/s=%.1f sleep/s=%.1f packets/s=%.1f underrun=%llu skip=%llu late=%llu blocked=%llu drop=%llu overrun=%llu",(unsigned)test/(unsigned)BENCH_MODES+1,active_profile,batch,ok?(warm_ok?"PASS_COUNTERS":"PASS_STEADY_WARN_STARTUP"):"FAIL_COUNTERS",r.seconds,r.valid,r.user_pct+r.sys_pct,r.user_pct,r.sys_pct,r.write_rate,(cur.fs_calls-start.fs_calls)/r.seconds,r.loop_rate,r.sleep_rate,(cur.packets-start.packets)/r.seconds,(unsigned long long)(cur.underruns-start.underruns),(unsigned long long)(cur.skipped-start.skipped),(unsigned long long)(cur.late-start.late),(unsigned long long)(cur.blocked-start.blocked),(unsigned long long)(cur.drop-start.drop),(unsigned long long)(cur.overruns-start.overruns));finish=1;
+        web_bench_line("round=%u profile=%u mode=%u %s seconds=%.3f cpu_valid=%d cpu=%.3f user=%.3f sys=%.3f writes/s=%.1f fs_calls/s=%.1f loops/s=%.1f sleep/s=%.1f packets/s=%.1f underrun=%llu skip=%llu late=%llu blocked=%llu drop=%llu overrun=%llu",(unsigned)test/(unsigned)BENCH_COUNT+1,active_profile,batch,ok?(warm_ok?"PASS_COUNTERS":"PASS_STEADY_WARN_STARTUP"):"FAIL_COUNTERS",r.seconds,r.valid,r.user_pct+r.sys_pct,r.user_pct,r.sys_pct,r.write_rate,(cur.fs_calls-start.fs_calls)/r.seconds,r.loop_rate,r.sleep_rate,(cur.packets-start.packets)/r.seconds,(unsigned long long)(cur.underruns-start.underruns),(unsigned long long)(cur.skipped-start.skipped),(unsigned long long)(cur.late-start.late),(unsigned long long)(cur.blocked-start.blocked),(unsigned long long)(cur.drop-start.drop),(unsigned long long)(cur.overruns-start.overruns));finish=1;
       }
       if(finish){
         if(online){control_disconnected(0);source_enable(&src,0);solo_close(&solo);online=0;late_total+=pace.late;blocked_total+=pace.blocked;}
         test++;measuring=0;stable_at=0;phase_at=now_sec();next_open=phase_at;
         phase_under=player.underruns;phase_skip=player.skipped;phase_drop=atomic_load(&src.dropped);phase_over=atomic_load(&src.overruns);phase_preroll=player.preroll;
-        if((unsigned)test>=rounds*BENCH_MODES){test=-1;active_profile=selected;profile=bench_modes[selected];batch=profile.batch;web_bench_line("FINISHED; restoring selected profile=%u. Confirm sound manually.",selected);web_bench_end();}
-        else {active_profile=bench_id((unsigned)test);profile=bench_modes[active_profile];batch=profile.batch;web_bench_line("round=%u profile=%u batch=%u slots=%u request=%u reserve=%u prime=%u poll=%u adaptive=%u simd=%u starting",(unsigned)test/(unsigned)BENCH_MODES+1,active_profile,batch,profile.slots,profile.request,profile.reserve,profile.prime,profile.poll,profile.adaptive,profile.vector);}
+        if((unsigned)test>=rounds*BENCH_COUNT){test=-1;active_profile=selected;profile=bench_modes[selected];batch=profile.batch;web_bench_line("FINISHED; restoring selected profile=%u. Confirm sound manually.",selected);web_bench_end();}
+        else {active_profile=bench_id((unsigned)test);profile=bench_modes[active_profile];batch=profile.batch;web_bench_line("round=%u profile=%u batch=%u slots=%u request=%u reserve=%u prime=%u poll=%u adaptive=%u simd=%u completion=%u starting",(unsigned)test/(unsigned)BENCH_COUNT+1,active_profile,batch,profile.slots,profile.request,profile.reserve,profile.prime,profile.poll,profile.adaptive,profile.vector,profile.efficient);}
         previous=perf_take(now_sec(),writes,loops,sleeps);rate=(perf_rate){0};next_perf=previous.at+5;perf_fs_base=fs_calls;perf_packets_base=packets;perf_empty_base=empty_wakes;fs_rate=packet_rate=empty_rate=0;
       }
     }

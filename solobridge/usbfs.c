@@ -47,6 +47,19 @@ int fs_complete(usbfs *f,int fd){
   }
   f->completed+=f->n;return (int)i+1;
 }
+/* FreeBSD ugen_fs_get_complete clears flag_iscomplete only after an
+ * empty dequeue. Drain before submitting new transfers; at most opened
+ * completions can exist because nothing is resubmitted inside this loop. */
+int fs_drain(usbfs *f,int fd){
+  unsigned done=0;
+  for(unsigned i=0;i<=f->opened;i++){
+    int r=fs_complete(f,fd);
+    if(r<0)return -1;
+    if(!r)return (int)done;
+    done++;
+  }
+  errno=EIO;return -1;
+}
 int fs_cleanup(usbfs *f,int fd){
   if(!f->initialized)return 0;
   /* UNINIT cancels and drains every opened transfer, including partial setup. */
