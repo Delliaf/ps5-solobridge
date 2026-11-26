@@ -50,3 +50,6 @@ requires a photodiode or simultaneous high-speed A/V measurement.
 The in-panel queue p95 is sampled, not an actual latency percentile.
 No mode is permanently selected by the benchmark; choose after real console
 results, audible verification and sustained game stress test.
+
+## v2.5.0 hardware feedback
+PS5 13.00 reports 1024 frames every ~21.33ms; smaller requests return 0x81950001. x8x2 was below 8000 packets/s. Do not retry these in benchmark. Adaptive polling reduced source thread CPU from 0.430% to 0.172% in one 25s comparison; x16x2 adaptive had the lowest sampled queue mean (22.041ms). Repeat controlled profiles before selecting. No actual sub-frame physical latency proven. The manual profile selection is volatile and automatically falls back on detected failure, not on all possible audible artifacts or a driver hang.

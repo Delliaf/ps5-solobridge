@@ -28,6 +28,7 @@ static void *run(void *arg) {
   float rec[CAPTURE_RECORD/sizeof(float)];
   double retry=0,last=0,last_record=0,next_cpu=0;
   unsigned request=ENG_RECORD,poll_us=2000,adaptive=0,last_frames=ENG_RECORD;
+  /* The only successful raw AVCAP record size on tested PS5 13.00 is 1024. */
   while (!atomic_load(&s->stop)) {
     unsigned next=atomic_load(&s->request_generation);
     if (next!=generation) {
@@ -67,8 +68,9 @@ static void *run(void *arg) {
         atomic_fetch_add(&s->gaps,1);atomic_fetch_add(&s->gap_sum_us,gap);
         if(gap>atomic_load(&s->gap_max_us))atomic_store(&s->gap_max_us,gap);}
       last_record=arrived;last_frames=(unsigned)frames;atomic_fetch_add(&s->frames,frames);
-      probe_feed(rec,frames);
+      /* Publish audio before optional diagnostics; keep the capture path short. */
       size_t put=eng_push(&s->ring,rec,frames);
+      if(put==frames)probe_feed(rec,frames);else probe_discontinuity();
       if (put<frames) atomic_fetch_add(&s->dropped,frames-put);
       last=seconds();
     }

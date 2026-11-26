@@ -4,21 +4,31 @@
 #include <stdio.h>
 #include "perf.h"
 typedef struct {unsigned batch,slots,request,reserve,poll,adaptive,trim,efficient,vector;} bench_profile;
+/* Indexes are version-local and used by the web UI. No automatic persistence. */
 static const bench_profile bench_modes[]={
-  {0,3,1024,192,2000,0,0,0,0},
-  {64,3,1024,192,2000,0,0,0,0},
-  {32,2,1024,96,2000,0,1,1,0},
-  {24,2,1024,96,2000,0,1,1,0},
-  {16,2,1024,96,2000,0,1,1,0},
-  {8,2,1024,96,2000,0,1,1,0},
-  {16,2,512,96,1000,0,1,1,0},
-  {16,2,256,96,1000,0,1,1,0},
-  {16,2,128,96,500,0,1,1,0},
-  {16,2,1024,96,500,0,1,1,0},
-  {16,2,1024,96,2000,1,1,1,0},
-  {16,2,1024,96,2000,0,1,1,1}
+  {0,3,1024,192,2000,0,0,0,0}, /* known safe fallback */
+  {16,2,1024,96,2000,1,1,1,0}, /* previous profile 10 control */
+  {16,3,1024,96,2000,1,1,1,1},
+  {24,2,1024,96,2000,1,1,1,1},
+  {24,3,1024,96,2000,1,1,1,1},
+  {32,2,1024,96,2000,1,1,1,1},
+  {32,3,1024,96,2000,1,1,1,1},
+  {16,3,1024,48,1000,1,1,1,1},
+  {16,2,1024,96,2000,1,1,1,1}
 };
 #define BENCH_MODES (sizeof(bench_modes)/sizeof(bench_modes[0]))
+#define BENCH_WARMUP 8
+#define BENCH_SECONDS 45
+static inline unsigned bench_id(unsigned step){
+  unsigned i=step%BENCH_MODES;
+  return (step/BENCH_MODES)%2?BENCH_MODES-1-i:i;
+}
+static inline int profile_valid(unsigned i){return i<BENCH_MODES;}
+/* Stream rate guard uses two consecutive bad windows, not a single jittery
+ * boundary. Errors and drops can independently trigger fallback. */
+static inline unsigned rate_bad(unsigned old,double rate){
+  return rate<7975||rate>8025?(old<2?old+1:2):0;
+}
 typedef struct {uint64_t reads,empty,frames,gaps,gap_us;unsigned min,max,gap_max;} capture_stats;
 #define QUEUE_BINS 512
 typedef struct {uint64_t bin[QUEUE_BINS],n;double sum,max;} queue_stats;

@@ -31,7 +31,10 @@ int main(void){
     assert(fs_cleanup(&f,1)==0);
   }
   fail_open=1;assert(fs_setup(&f,1,32,3)<0&&f.initialized);assert(fs_cleanup(&f,1)==0&&uninit==4);
-  expected_slots=2;fail_open=0;assert(fs_setup(&f,1,8,2)==0&&f.opened==2);assert(fs_submit(&f,1,1)==0);assert(fs_complete(&f,1)==2);assert(fs_cleanup(&f,1)==0);
+  expected_slots=2;fail_open=0;assert(fs_setup(&f,1,24,2)==0&&f.opened==2);assert(fs_submit(&f,1,1)==0);assert(fs_complete(&f,1)==2);assert(fs_cleanup(&f,1)==0);
+  assert(fs_setup(&f,1,8,2)<0&&!f.initialized);
+  for(unsigned i=0;i<BENCH_MODES;i++){assert(bench_id(i)==i&&bench_id(BENCH_MODES+i)==BENCH_MODES-1-i);assert(bench_modes[i].request==1024);}
+  assert(rate_bad(0,7972)==1&&rate_bad(1,7972)==2&&rate_bad(2,8000)==0);
   bench_sample a={.cpu={.at=1}},b={.cpu={.at=26},.packets=200000};
   assert(bench_pass(a,b,0)&&bench_pass(a,b,64));
   b.underruns=1;assert(!bench_pass(a,b,32));b.underruns=0;b.packets=190000;assert(!bench_pass(a,b,32));

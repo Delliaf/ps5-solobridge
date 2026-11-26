@@ -7,7 +7,7 @@ typedef struct {
   double queue;
   uint64_t underruns,late,blocked,reconnects,source_drop,skipped,writes;
   perf_rate perf;
-  unsigned batch,slots,read_min,read_max,gap_max_us;
+  unsigned batch,slots,read_min,read_max,gap_max_us,profile,selected;
 } web_audio;
 int web_bench_command(void);
 void web_bench_begin(void);

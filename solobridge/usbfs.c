@@ -4,7 +4,7 @@
 #include <string.h>
 int fs_setup(usbfs *f,int fd,unsigned n,unsigned slots) {
   memset(f,0,sizeof(*f));
-  if((n!=8&&n!=16&&n!=24&&n!=32&&n!=64)||(slots!=2&&slots!=3)){errno=EINVAL;return -1;}
+  if((n!=16&&n!=24&&n!=32&&n!=64)||(slots!=2&&slots!=3)){errno=EINVAL;return -1;}
   f->n=n;
   fs_init init={.pEndpoints=f->ep,.ep_index_max=slots};
   if(ioctl(fd,FS_INIT,&init)<0){log_line("USB_FS INIT errno=%d",errno);return -1;}

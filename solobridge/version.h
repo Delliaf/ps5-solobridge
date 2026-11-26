@@ -1,4 +1,4 @@
 #ifndef TTGK_VERSION_H
 #define TTGK_VERSION_H
-#define TTGK_VERSION "2.4.0"
+#define TTGK_VERSION "2.5.0"
 #endif

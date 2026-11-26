@@ -29,7 +29,7 @@ try:
     req("GET","/api/status",False,403,{"Host":"attacker.example"})
     req("POST","/api/volume/128",True,403,{"Origin":"http://attacker.example"})
     s=json.loads(req("GET","/api/status",False))
-    assert s["hw"]==68 and s["version"]=="2.4.0" and s["fresh"]==1 and "pad" not in s
+    assert s["hw"]==68 and s["version"]=="2.5.0" and s["fresh"]==1 and "pad" not in s
     req("POST","/api/volume/108")
     assert json.loads(req("GET","/api/status",False))["desired"]==108
     req("POST","/api/volume/up")
@@ -44,11 +44,16 @@ try:
     assert json.loads(req("GET","/api/status"))["economy"]==0
     req("POST","/api/pacing/economy")
     assert json.loads(req("GET","/api/status"))["economy"]==1
+    req("POST","/api/profile/2")
+    time.sleep(.1)
+    assert json.loads(req("GET","/api/status"))["selected"]==2
+    req("POST","/api/profile/99",True,404)
     req("POST","/api/benchmark/start")
     time.sleep(.1)
     assert json.loads(req("GET","/api/status"))["benchmark_running"]==1
     req("POST","/api/benchmark/start",True,409)
     req("POST","/api/pacing/legacy",True,409)
+    req("POST","/api/profile/1",True,409)
     req("POST","/api/web/disable",True,409)
     assert not (root/"disable_web").exists()
     assert b"mock result" in req("GET","/api/benchmark/report")
