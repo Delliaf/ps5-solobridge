@@ -39,6 +39,7 @@ jobs:
           python3 -m venv /tmp/ttgk-analyzer
           /tmp/ttgk-analyzer/bin/pip install numpy
           /tmp/ttgk-analyzer/bin/python tests/test_compare_tempest.py
+          /tmp/ttgk-analyzer/bin/python tests/test_latency.py
   ps5-build:
     runs-on: ubuntu-24.04
     steps:

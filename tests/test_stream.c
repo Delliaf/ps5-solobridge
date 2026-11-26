@@ -68,8 +68,22 @@ static void exact_pcm(void){
   assert(a.preroll==b.preroll&&a.underruns==b.underruns&&a.skipped==b.skipped);
   puts("PCM scalar/SSE2 bit equality and batched ring tests passed");
 }
+/* Capture/USB scheduling simulation with the actual low-latency priming
+ * and batch reader. No assertion about real PS5 timing is implied. */
+static void low_profile(unsigned record,unsigned batch){
+  eng_init(&r);eng_player p;eng_player_init(&p);eng_profile(&p,record,96,1);
+  float x[2048]={0};uint8_t out[64*ENG_BYTES];
+  double due=0,period=record*8000.0/48000.0;
+  for(unsigned i=0;i<8000*30;i+=batch){
+    while(i>=due){assert(eng_push(&r,x,record)==record);due+=period;}
+    eng_packets(&r,&p,out,batch);
+    assert(eng_fill(&r)<=ENG_RING);
+  }
+  assert(p.playing&&p.underruns==0&&p.skipped==0);
+}
 int main(void) {
   exact_pcm();
+  low_profile(1024,16);low_profile(512,16);low_profile(256,16);low_profile(128,8);
   concurrent(); simulate(500); simulate(-500); simulate(0);
   puts("stream concurrency and drift tests passed");
 }

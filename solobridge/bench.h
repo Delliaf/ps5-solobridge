@@ -20,6 +20,19 @@ static const bench_profile bench_modes[]={
 };
 #define BENCH_MODES (sizeof(bench_modes)/sizeof(bench_modes[0]))
 typedef struct {uint64_t reads,empty,frames,gaps,gap_us;unsigned min,max,gap_max;} capture_stats;
+#define QUEUE_BINS 512
+typedef struct {uint64_t bin[QUEUE_BINS],n;double sum,max;} queue_stats;
+static inline void queue_add(queue_stats *s,double ms){
+  if(ms<0)return;
+  unsigned i=ms>=255.5?QUEUE_BINS-1:(unsigned)(ms*2);
+  s->bin[i]++;s->n++;s->sum+=ms;if(ms>s->max)s->max=ms;
+}
+static inline double queue_p95(const queue_stats *s){
+  if(!s->n)return 0;
+  uint64_t need=(s->n*95+99)/100,seen=0;
+  for(unsigned i=0;i<QUEUE_BINS;i++){seen+=s->bin[i];if(seen>=need)return (i+1)*0.5;}
+  return 256;
+}
 typedef struct {perf_sample cpu;uint64_t packets,underruns,skipped,late,blocked,drop,overruns,reconnects,fs_calls;unsigned epoch;} bench_sample;
 static inline int bench_pass(bench_sample a,bench_sample b,unsigned batch){
   double dt=b.cpu.at-a.cpu.at;
