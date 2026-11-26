@@ -9,6 +9,13 @@ static double seconds(void) {
   struct timespec t; clock_gettime(CLOCK_MONOTONIC,&t);
   return t.tv_sec+t.tv_nsec/1e9;
 }
+static void sample_cpu(source_t *s){
+#ifdef CLOCK_THREAD_CPUTIME_ID
+  struct timespec t;
+  if(clock_gettime(CLOCK_THREAD_CPUTIME_ID,&t)==0){atomic_store(&s->cpu_ns,(uint64_t)t.tv_sec*1000000000+t.tv_nsec);atomic_store(&s->cpu_valid,1);return;}
+#endif
+  atomic_store(&s->cpu_valid,0);
+}
 static void inactive(source_t *s) {
   probe_discontinuity();
   atomic_store(&s->active_generation,0);
@@ -19,7 +26,7 @@ static void *run(void *arg) {
   source_t *s=arg; int loaded=0,active=0;
   unsigned generation=atomic_load(&s->request_generation);
   float rec[CAPTURE_RECORD/sizeof(float)];
-  double retry=0,last=0,last_record=0;
+  double retry=0,last=0,last_record=0,next_cpu=0;
   unsigned request=ENG_RECORD,poll_us=2000,adaptive=0,last_frames=ENG_RECORD;
   while (!atomic_load(&s->stop)) {
     unsigned next=atomic_load(&s->request_generation);
@@ -33,6 +40,7 @@ static void *run(void *arg) {
       retry=0; usleep(50000); continue;
     }
     double now=seconds();
+    if(now>=next_cpu){sample_cpu(s);next_cpu=now+0.25;}
     if (!active) {
       if (now<retry) { usleep(20000); continue; }
       int r=loaded?capture_restart():capture_open();
@@ -90,7 +98,7 @@ int source_start(source_t *s) {
   atomic_init(&s->dropped,0); eng_init(&s->ring);
   atomic_init(&s->request_frames,1024);atomic_init(&s->poll_us,2000);atomic_init(&s->adaptive,0);
   atomic_init(&s->read_min,0);atomic_init(&s->read_max,0);atomic_init(&s->gap_max_us,0);
-  atomic_init(&s->reads,0);atomic_init(&s->empty,0);atomic_init(&s->frames,0);atomic_init(&s->gaps,0);atomic_init(&s->gap_sum_us,0);
+  atomic_init(&s->reads,0);atomic_init(&s->empty,0);atomic_init(&s->frames,0);atomic_init(&s->gaps,0);atomic_init(&s->gap_sum_us,0);atomic_init(&s->cpu_ns,0);atomic_init(&s->cpu_valid,0);
   return pthread_create(&s->thread,NULL,run,s)?-1:0;
 }
 /* Main is the sole requester: low bit is enabled; each transition

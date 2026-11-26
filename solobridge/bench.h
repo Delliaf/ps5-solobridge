@@ -3,19 +3,20 @@
 #include <stdint.h>
 #include <stdio.h>
 #include "perf.h"
-typedef struct {unsigned batch,slots,request,reserve,poll,adaptive,trim,efficient;} bench_profile;
+typedef struct {unsigned batch,slots,request,reserve,poll,adaptive,trim,efficient,vector;} bench_profile;
 static const bench_profile bench_modes[]={
-  {0,3,1024,192,2000,0,0,0},
-  {64,3,1024,192,2000,0,0,0},
-  {32,2,1024,96,2000,0,1,1},
-  {24,2,1024,96,2000,0,1,1},
-  {16,2,1024,96,2000,0,1,1},
-  {8,2,1024,96,2000,0,1,1},
-  {16,2,512,96,1000,0,1,1},
-  {16,2,256,96,1000,0,1,1},
-  {16,2,128,96,500,0,1,1},
-  {16,2,1024,96,500,0,1,1},
-  {16,2,1024,96,2000,1,1,1}
+  {0,3,1024,192,2000,0,0,0,0},
+  {64,3,1024,192,2000,0,0,0,0},
+  {32,2,1024,96,2000,0,1,1,0},
+  {24,2,1024,96,2000,0,1,1,0},
+  {16,2,1024,96,2000,0,1,1,0},
+  {8,2,1024,96,2000,0,1,1,0},
+  {16,2,512,96,1000,0,1,1,0},
+  {16,2,256,96,1000,0,1,1,0},
+  {16,2,128,96,500,0,1,1,0},
+  {16,2,1024,96,500,0,1,1,0},
+  {16,2,1024,96,2000,1,1,1,0},
+  {16,2,1024,96,2000,0,1,1,1}
 };
 #define BENCH_MODES (sizeof(bench_modes)/sizeof(bench_modes[0]))
 typedef struct {uint64_t reads,empty,frames,gaps,gap_us;unsigned min,max,gap_max;} capture_stats;

@@ -48,7 +48,7 @@ void web_bench_line(const char *fmt,...){
 }
 void web_bench_begin(void){
   pthread_mutex_lock(&bench_lock);bench_len=0;bench_text[0]=0;pthread_mutex_unlock(&bench_lock);
-  web_bench_line("TTGK v%s pid=%d latency benchmark: 11 profiles; queue metrics are estimates, not end-to-end latency; 5s warmup, 25s measured; CPU relative to one core",TTGK_VERSION,getpid());
+  web_bench_line("TTGK v%s pid=%d latency benchmark: 12 profiles; queue metrics are estimates, not end-to-end latency; 5s warmup, 25s measured; CPU relative to one core",TTGK_VERSION,getpid());
 }
 void web_bench_end(void){atomic_store(&bench_running,0);}
 

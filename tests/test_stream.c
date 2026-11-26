@@ -43,7 +43,33 @@ static void simulate(double ppm) {
   printf("drift %+.0f ppm: underruns=%llu fill=%zu correction=%d\n",
     ppm,(unsigned long long)p.underruns,eng_fill(&r),p.delta);
 }
+static eng_ring r2;
+static void exact_pcm(void){
+  uint32_t seed=1234567;
+  for(unsigned i=0;i<200000;i++){
+    eng_frame x;uint32_t bits[2];
+    for(unsigned j=0;j<2;j++){seed=1664525u*seed+1013904223u;bits[j]=seed;}
+    memcpy(&x,bits,sizeof(x));
+    uint8_t a[6],b[6];eng_pack(a,x);eng_pack_vector(b,x);assert(!memcmp(a,b,6));
+  }
+  eng_init(&r);eng_init(&r2);eng_player a,b;eng_player_init(&a);eng_player_init(&b);
+  eng_profile(&a,1024,96,1);eng_profile(&b,1024,96,1);b.vector=1;
+  float x[2048];
+  for(unsigned k=0;k<200;k++){
+    for(unsigned i=0;i<2048;i++)x[i]=(float)((int)(i%127)-63)/64;
+    assert(eng_push(&r,x,1024)==1024&&eng_push(&r2,x,1024)==1024);
+    for(unsigned n=0;n<10;n++){
+      uint8_t p[16*ENG_BYTES],q[16*ENG_BYTES];
+      for(unsigned j=0;j<16;j++)eng_packet(&r,&a,p+j*ENG_BYTES);
+      eng_packets(&r2,&b,q,16);
+      assert(!memcmp(p,q,sizeof(p)));assert(eng_fill(&r)==eng_fill(&r2));
+    }
+  }
+  assert(a.preroll==b.preroll&&a.underruns==b.underruns&&a.skipped==b.skipped);
+  puts("PCM scalar/SSE2 bit equality and batched ring tests passed");
+}
 int main(void) {
+  exact_pcm();
   concurrent(); simulate(500); simulate(-500); simulate(0);
   puts("stream concurrency and drift tests passed");
 }

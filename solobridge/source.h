@@ -10,6 +10,8 @@ typedef struct {
   atomic_uint request_frames,poll_us,adaptive;
   atomic_uint read_min,read_max,gap_max_us;
   atomic_ulong reads,empty,frames,gap_sum_us,gaps;
+  atomic_uint_fast64_t cpu_ns;
+  atomic_int cpu_valid;
   eng_ring ring;
 } source_t;
 int source_start(source_t *s);

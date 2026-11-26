@@ -163,6 +163,11 @@ int solo_open(solo_t *s,int verbose,int volume,unsigned batch,unsigned slots) {
   if (ioctl(s->ctl_fd,USB_GET_FULL_DESC,&gd)<0) goto fail;
   size_t n=gd.ugd_actlen?gd.ugd_actlen:(size_t)(buf[2]|(buf[3]<<8));
   if (n>sizeof(buf)||!ttgk_config(buf,n)) { errno=EINVAL; goto fail; }
+  #ifdef USB_GET_IFACE_DRIVER
+  if(verbose){for(unsigned i=0;i<2;i++){char driver[128]={0};struct usb_gen_descriptor d={0};d.ugd_data=driver;d.ugd_maxlen=sizeof(driver)-1;d.ugd_iface_index=i;
+    int r=ioctl(s->ctl_fd,USB_GET_IFACE_DRIVER,&d);int e=r<0?errno:0;driver[sizeof(driver)-1]=0;
+    log_line("native driver query iface=%u result=%d errno=%d name=%.100s",i,r,e,r<0?"":driver);}}
+  #endif
   s->maxpkt=288; s->channels=2; s->subslot=3; s->bits=24; s->configured=1;
   what="initial mute"; if (set_mute(s,1)<0) goto fail;
   what="alt 0"; if (set_alt(s,0)<0) goto fail;

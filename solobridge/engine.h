@@ -5,6 +5,9 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <string.h>
+#if defined(__SSE2__)
+#include <emmintrin.h>
+#endif
 #include "bridge_logic.h"
 #define ENG_RATE 48000
 #define ENG_RING 16384u
@@ -49,7 +52,8 @@ static inline void eng_discard(eng_ring *r,size_t n) {
 typedef struct {
   int playing,phase,delta,fade;
   unsigned target,window,min_fill,stable,floor,record;
-  int trim_prime;
+  int trim_prime,vector;
+  uint64_t preroll;
   uint64_t underruns,skipped,packets,silent;
   eng_frame last,from;
 } eng_player;
@@ -74,6 +78,27 @@ static inline void eng_pack(uint8_t *out,eng_frame f) {
   out[0]=l;out[1]=l>>8;out[2]=l>>16;
   out[3]=r;out[4]=r>>8;out[5]=r>>16;
 }
+/* Identical signed-32 conversion, then discard low eight bits as before.
+ * SSE2 is x86-64 baseline. No fast-math, no change of interpolation. */
+static inline void eng_pack_vector(uint8_t *out,eng_frame f) {
+#if defined(__SSE2__)
+  __m128 x=_mm_setr_ps(f.l,f.r,0,0);
+  x=_mm_and_ps(x,_mm_cmpord_ps(x,x));
+  __m128 pos=_mm_cmpge_ps(x,_mm_set1_ps(1.0f));
+  x=_mm_max_ps(x,_mm_set1_ps(-1.0f));
+  x=_mm_min_ps(x,_mm_set1_ps(1.0f));
+  __m128i q=_mm_cvttps_epi32(_mm_mul_ps(x,_mm_set1_ps(2147483648.0f)));
+  __m128i m=_mm_castps_si128(pos);
+  q=_mm_or_si128(_mm_and_si128(m,_mm_set1_epi32(0x7fffffff)),_mm_andnot_si128(m,q));
+  uint32_t l=(uint32_t)_mm_cvtsi128_si32(q)>>8,r=(uint32_t)_mm_cvtsi128_si32(_mm_srli_si128(q,4))>>8;
+  out[0]=l;out[1]=l>>8;out[2]=l>>16;out[3]=r;out[4]=r>>8;out[5]=r>>16;
+#else
+  eng_pack(out,f);
+#endif
+}
+static inline void eng_pack_selected(eng_player *p,uint8_t *out,eng_frame f){
+  if(p->vector)eng_pack_vector(out,f);else eng_pack(out,f);
+}
 static inline void eng_transition(eng_player *p) {
   p->from=p->last; p->fade=48; /* 1 ms, only discontinuities, not volume control */
 }
@@ -89,17 +114,18 @@ static inline eng_frame eng_fade(eng_player *p,eng_frame f) {
 }
 /* Fixed six frames/microframe. Fractional phase compensates clock mismatch
  * with interpolation instead of abrupt frame deletion/duplication. */
-static inline void eng_packet(eng_ring *r,eng_player *p,uint8_t out[ENG_BYTES]) {
-  size_t fill=eng_fill(r);
+static inline void eng_packet_core(eng_ring *r,eng_player *p,uint8_t out[ENG_BYTES],uint64_t *cursor) {
+  uint64_t rd=*cursor;
+  size_t fill=(size_t)(atomic_load_explicit(&r->wr,memory_order_acquire)-rd);
   if (!p->playing && fill>=p->record+p->target+2) {
     /* At startup only, discard already stale, still muted pre-roll. */
-    if(p->trim_prime){size_t keep=p->record+p->target+2;eng_discard(r,fill-keep);fill=keep;}
+    if(p->trim_prime){size_t keep=p->record+p->target+2;p->preroll+=fill-keep;rd+=fill-keep;fill=keep;}
     p->playing=1; p->phase=p->delta=0; p->window=0; p->min_fill=ENG_RING;
     eng_transition(p);
   }
   if (p->playing && fill>4096) {
     size_t skip=fill-(p->record+p->target);
-    eng_discard(r,skip); p->skipped+=skip; fill-=skip;
+    rd+=skip; p->skipped+=skip; fill-=skip;
     p->phase=p->delta=0; p->window=0; p->min_fill=ENG_RING; eng_transition(p);
   }
   /* A complete packet can consume at most seven source frames plus lookahead. */
@@ -111,8 +137,8 @@ static inline void eng_packet(eng_ring *r,eng_player *p,uint8_t out[ENG_BYTES]) 
   p->packets++;
   if (!p->playing) {
     p->silent++;
-    for (unsigned i=0;i<ENG_FRAMES;i++) eng_pack(out+i*6,eng_fade(p,(eng_frame){0,0}));
-    return;
+    for (unsigned i=0;i<ENG_FRAMES;i++) eng_pack_selected(p,out+i*6,eng_fade(p,(eng_frame){0,0}));
+    *cursor=rd;return;
   }
   if (fill<p->min_fill) p->min_fill=(unsigned)fill;
   if (++p->window>=4000) {
@@ -128,15 +154,26 @@ static inline void eng_packet(eng_ring *r,eng_player *p,uint8_t out[ENG_BYTES]) 
     }
     p->window=0; p->min_fill=ENG_RING;
   }
-  uint64_t rd=atomic_load_explicit(&r->rd,memory_order_relaxed);
   for (unsigned i=0;i<ENG_FRAMES;i++) {
     eng_frame a=r->data[rd&(ENG_RING-1)], b=r->data[(rd+1)&(ENG_RING-1)];
     a.l=eng_clean(a.l);a.r=eng_clean(a.r);b.l=eng_clean(b.l);b.r=eng_clean(b.r);
     float t=(float)p->phase/ENG_Q;
-    eng_pack(out+i*6,eng_fade(p,(eng_frame){a.l+(b.l-a.l)*t,a.r+(b.r-a.r)*t}));
+    eng_pack_selected(p,out+i*6,eng_fade(p,(eng_frame){a.l+(b.l-a.l)*t,a.r+(b.r-a.r)*t}));
     unsigned step=(unsigned)(p->phase+ENG_Q+p->delta);
     rd+=step/ENG_Q; p->phase=(int)(step%ENG_Q);
   }
+  *cursor=rd;
+}
+static inline void eng_packet(eng_ring *r,eng_player *p,uint8_t out[ENG_BYTES]){
+  uint64_t rd=atomic_load_explicit(&r->rd,memory_order_relaxed);
+  eng_packet_core(r,p,out,&rd);
+  atomic_store_explicit(&r->rd,rd,memory_order_release);
+}
+/* Publish the read cursor once per USB block, not once per microframe.
+ * Reload producer cursor per packet, so arrivals can still be consumed. */
+static inline void eng_packets(eng_ring *r,eng_player *p,uint8_t *out,unsigned count){
+  uint64_t rd=atomic_load_explicit(&r->rd,memory_order_relaxed);
+  for(unsigned i=0;i<count;i++)eng_packet_core(r,p,out+i*ENG_BYTES,&rd);
   atomic_store_explicit(&r->rd,rd,memory_order_release);
 }
 /* Time-based queue estimate only; not a measurement of the USB kernel FIFO.

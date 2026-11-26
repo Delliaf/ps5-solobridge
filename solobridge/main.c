@@ -42,7 +42,13 @@ static capture_stats capture_snapshot(source_t *s){
 }
 static void configure(source_t *s,eng_player *p,bench_profile q){
   atomic_store(&s->request_frames,q.request);atomic_store(&s->poll_us,q.poll);atomic_store(&s->adaptive,q.adaptive);
-  eng_profile(p,q.request,q.reserve,q.trim);
+  eng_profile(p,q.request,q.reserve,q.trim);p->vector=q.vector;
+}
+static int thread_cpu(double *value){
+#ifdef CLOCK_THREAD_CPUTIME_ID
+  struct timespec t;if(clock_gettime(CLOCK_THREAD_CPUTIME_ID,&t)==0){*value=t.tv_sec+t.tv_nsec/1e9;return 1;}
+#endif
+  *value=0;return 0;
 }
 static double queue_ms(eng_ring *r,solo_t *s,int online,unsigned batch,eng_pacer *pace){
   return eng_fill(r)/48.0+(online&&batch?__builtin_popcount(s->fs.busy)*batch:pace->queued)/8.0;
@@ -74,7 +80,7 @@ int main(void) {
   eng_pacer pace; eng_pace_init(&pace,last_tick);
   uint8_t packet[ENG_BYTES];
   uint64_t reconnects=0,late_total=0,blocked_total=0,writes=0,loops=0,sleeps=0,packets=0,fs_calls=0;
-  bench_profile profile=bench_modes[0];unsigned batch=0;capture_stats cap_start={0};double qsum=0,qmax=0,qnext=0;uint64_t qcount=0;
+  bench_profile profile=bench_modes[0];unsigned batch=0;capture_stats cap_start={0};double qsum=0,qmax=0,qnext=0;uint64_t qcount=0,source_cpu_start=0;double main_cpu_start=0;int main_cpu_valid=0,source_cpu_valid=0;
   int test=-1,measuring=0;double phase_at=0,stable_at=0,fs_last=0;bench_sample start={0};
   int economy=1;
   if(access(DIR "/legacy_pacing",F_OK)==0)economy=0;
@@ -150,10 +156,9 @@ int main(void) {
         if(f->completed!=done_before)fs_last=now_sec();
         if(now_sec()-fs_last>0.15){log_line("USB_FS completion watchdog");failed=1;}
         for(unsigned i=0;i<f->opened&&!failed;i++)if(!(f->busy&(1u<<i))){
-          for(unsigned j=0;j<batch;j++){
-            if(cap)eng_packet(&src.ring,&player,f->data[i][j]);
-            else memset(f->data[i][j],0,ENG_BYTES);
-          }
+          if(cap&&profile.efficient)eng_packets(&src.ring,&player,&f->data[i][0][0],batch);
+          else if(cap){for(unsigned j=0;j<batch;j++)eng_packet(&src.ring,&player,f->data[i][j]);}
+          else memset(f->data[i],0,batch*ENG_BYTES);
           if(fs_submit(f,solo.ctl_fd,i)<0){log_line("USB_FS START errno=%d",errno);failed=1;break;}
         }
         fs_calls+=f->calls-prior;
@@ -216,7 +221,7 @@ int main(void) {
       else if(!measuring){
         if(online&&gate&&source_active(&src)&&solo_volume_done(&solo)>=0){
           if(!stable_at)stable_at=now;
-          if(now-stable_at>=5){cur.cpu=perf_take(now,writes,loops,sleeps);start=cur;cap_start=capture_snapshot(&src);qsum=qmax=0;qcount=0;qnext=now;measuring=1;web_bench_line("profile=%d batch=%u slots=%u request=%u reserve=%u poll=%u adaptive=%u measuring 25s",test,batch,profile.slots,profile.request,profile.reserve,profile.poll,profile.adaptive);}
+          if(now-stable_at>=5){cur.cpu=perf_take(now,writes,loops,sleeps);start=cur;cap_start=capture_snapshot(&src);main_cpu_valid=thread_cpu(&main_cpu_start);source_cpu_start=atomic_load(&src.cpu_ns);source_cpu_valid=atomic_load(&src.cpu_valid);qsum=qmax=0;qcount=0;qnext=now;measuring=1;web_bench_line("profile=%d batch=%u slots=%u request=%u reserve=%u poll=%u adaptive=%u simd=%u measuring 25s",test,batch,profile.slots,profile.request,profile.reserve,profile.poll,profile.adaptive,profile.vector);}
         }else stable_at=0;
         if(now-phase_at>15&&!measuring){web_bench_line("mode=%u FAIL startup timeout",batch);finish=1;}
       }else if(!online||!gate||cur.epoch!=start.epoch){
@@ -224,6 +229,8 @@ int main(void) {
       }else if(now-start.cpu.at>=25){
         cur.cpu=perf_take(now,writes,loops,sleeps);perf_rate r=perf_diff(start.cpu,cur.cpu);
         int ok=bench_pass(start,cur,batch);
+        double main_cpu=0;int mv=thread_cpu(&main_cpu)&&main_cpu_valid;uint64_t sc=atomic_load(&src.cpu_ns);int sv=source_cpu_valid&&atomic_load(&src.cpu_valid)&&sc>=source_cpu_start;
+        web_bench_line("profile=%d writer_cpu_valid=%d writer_cpu=%.3f source_cpu_valid=%d source_cpu=%.3f preroll_discard_total=%llu",test,mv,mv?100*(main_cpu-main_cpu_start)/r.seconds:0,sv,sv?100*(sc-source_cpu_start)/1e9/r.seconds:0,(unsigned long long)player.preroll);
         capture_stats cs=capture_snapshot(&src);double cg=cs.gaps>cap_start.gaps?(cs.gap_us-cap_start.gap_us)/(double)(cs.gaps-cap_start.gaps)/1000:0;
         web_bench_line("profile=%d capture_frames_min=%u max=%u mean_gap_ms=%.3f session_max_gap_ms=%.3f reads/s=%.1f empty/s=%.1f capture_frames/s=%.1f queue_sample_mean_ms=%.3f queue_sample_max_ms=%.3f samples=%llu",test,cs.min,cs.max,cg,cs.gap_max/1000.0,(cs.reads-cap_start.reads)/r.seconds,(cs.empty-cap_start.empty)/r.seconds,(cs.frames-cap_start.frames)/r.seconds,qcount?qsum/qcount:0,qmax,(unsigned long long)qcount);
         web_bench_line("profile=%d mode=%u %s seconds=%.3f cpu_valid=%d cpu=%.3f user=%.3f sys=%.3f writes/s=%.1f fs_calls/s=%.1f loops/s=%.1f sleep/s=%.1f packets/s=%.1f underrun=%llu skip=%llu late=%llu blocked=%llu drop=%llu overrun=%llu",test,batch,ok?"PASS_COUNTERS":"FAIL_COUNTERS",r.seconds,r.valid,r.user_pct+r.sys_pct,r.user_pct,r.sys_pct,r.write_rate,(cur.fs_calls-start.fs_calls)/r.seconds,r.loop_rate,r.sleep_rate,(cur.packets-start.packets)/r.seconds,(unsigned long long)(cur.underruns-start.underruns),(unsigned long long)(cur.skipped-start.skipped),(unsigned long long)(cur.late-start.late),(unsigned long long)(cur.blocked-start.blocked),(unsigned long long)(cur.drop-start.drop),(unsigned long long)(cur.overruns-start.overruns));finish=1;
@@ -232,7 +239,7 @@ int main(void) {
         if(online){control_disconnected(0);source_enable(&src,0);solo_close(&solo);online=0;late_total+=pace.late;blocked_total+=pace.blocked;}
         test++;measuring=0;stable_at=0;phase_at=now_sec();next_open=phase_at;
         if((unsigned)test>=BENCH_MODES){test=-1;profile=bench_modes[0];batch=0;web_bench_line("FINISHED; normal USB write requested. Confirm sound manually.");web_bench_end();}
-        else {profile=bench_modes[test];batch=profile.batch;web_bench_line("profile=%d batch=%u slots=%u request=%u reserve=%u poll=%u adaptive=%u starting",test,batch,profile.slots,profile.request,profile.reserve,profile.poll,profile.adaptive);}
+        else {profile=bench_modes[test];batch=profile.batch;web_bench_line("profile=%d batch=%u slots=%u request=%u reserve=%u poll=%u adaptive=%u simd=%u starting",test,batch,profile.slots,profile.request,profile.reserve,profile.poll,profile.adaptive,profile.vector);}
         previous=perf_take(now_sec(),writes,loops,sleeps);rate=(perf_rate){0};next_perf=previous.at+5;
       }
     }
