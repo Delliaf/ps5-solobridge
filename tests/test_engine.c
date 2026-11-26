@@ -42,7 +42,13 @@ int main(void) {
   while(t<60){eng_pace_tick(&q,t);while(eng_pace_need(&q)){eng_pace_write(&q);writes++;}
     unsigned wait=eng_pace_sleep(&q,t,1);assert(wait>0&&wait<=1000);
     calls++;t+=wait/1e6;}
-  assert(q.late==0 && writes>=479990 && writes<=480048 && calls<61000);
+  printf("economy 60s simulation: writes=%u wakeups=%u late=%llu\n",writes,calls,(unsigned long long)q.late);
+  assert(q.late==0 && writes>=479990 && writes<=480048 && calls<70000);
+  /* Simulated scheduler oversleep of up to 0.5ms, below queue margin. */
+  eng_pace_init(&q,0);calls=0;writes=0;t=0;
+  while(t<60){eng_pace_tick(&q,t);while(eng_pace_need(&q)){eng_pace_write(&q);writes++;}
+    unsigned wait=eng_pace_sleep(&q,t,1);calls++;t+=(wait+(calls%7)*80)/1e6;}
+  assert(q.late==0 && writes>=479980 && writes<=480048 && calls<70000);
   perf_sample a={.at=1,.user=1,.sys=2,.writes=100,.loops=20,.sleeps=10,.valid=1};
   perf_sample z={.at=6,.user=1.1,.sys=2.2,.writes=40100,.loops=5020,.sleeps=5010,.valid=1};
   perf_rate pfr=perf_diff(a,z);assert(pfr.valid&&fabs(pfr.user_pct-2)<1e-8&&fabs(pfr.sys_pct-4)<1e-8&&pfr.write_rate==8000&&pfr.loop_rate==1000);

@@ -153,7 +153,8 @@ static inline unsigned eng_pace_sleep(const eng_pacer *p,double now,int economy)
   double q=p->queued-elapsed*8000.0;
   double us=(q-(ENG_AHEAD-8.0))*125.0;
   if(us<=0)return 0;
-  return us>=1000?1000:(unsigned)us;
+  /* Round up, avoiding a zero-delay spin due to truncation. */
+  return us>=999.0?1000:(unsigned)(us+0.999999);
 }
 static inline void eng_pace_block(eng_pacer *p) { p->blocked++; }
 #endif
