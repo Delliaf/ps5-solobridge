@@ -143,5 +143,17 @@ static inline void eng_pace_tick(eng_pacer *p,double now) {
 }
 static inline int eng_pace_need(eng_pacer *p) { return p->queued+1<=ENG_AHEAD; }
 static inline void eng_pace_write(eng_pacer *p) { p->queued+=1; }
+/* Wait until about eight packet credits are available, preserving the
+ * 48-packet upper bound and leaving roughly 5ms queued at nominal timing.
+ * Queue depth is estimated, so this is selectable rather than a guarantee. */
+static inline unsigned eng_pace_sleep(const eng_pacer *p,double now,int economy) {
+  if(!economy)return 250;
+  double elapsed=now-p->last;
+  if(elapsed<0)elapsed=0;
+  double q=p->queued-elapsed*8000.0;
+  double us=(q-(ENG_AHEAD-8.0))*125.0;
+  if(us<=0)return 0;
+  return us>=1000?1000:(unsigned)us;
+}
 static inline void eng_pace_block(eng_pacer *p) { p->blocked++; }
 #endif

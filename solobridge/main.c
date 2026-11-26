@@ -2,6 +2,8 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <sys/file.h>
+#include <sys/resource.h>
+#include "perf.h"
 #include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
@@ -23,6 +25,15 @@ static void stop_signal(int s) { (void)s; running=0; }
 static double now_sec(void) {
   struct timespec t; clock_gettime(CLOCK_MONOTONIC,&t);
   return t.tv_sec+t.tv_nsec/1e9;
+}
+static perf_sample perf_take(double now,uint64_t writes,uint64_t loops,uint64_t sleeps) {
+  perf_sample p={.at=now,.writes=writes,.loops=loops,.sleeps=sleeps};
+  struct rusage ru;
+  if(getrusage(RUSAGE_SELF,&ru)==0){
+    p.valid=1;p.user=ru.ru_utime.tv_sec+ru.ru_utime.tv_usec/1e6;
+    p.sys=ru.ru_stime.tv_sec+ru.ru_stime.tv_usec/1e6;
+  }
+  return p;
 }
 int main(void) {
   signal(SIGPIPE,SIG_IGN); signal(SIGINT,stop_signal); signal(SIGTERM,stop_signal);
@@ -50,9 +61,17 @@ int main(void) {
   eng_player player; eng_player_init(&player);
   eng_pacer pace; eng_pace_init(&pace,last_tick);
   uint8_t packet[ENG_BYTES];
-  uint64_t reconnects=0,late_total=0,blocked_total=0;
+  uint64_t reconnects=0,late_total=0,blocked_total=0,writes=0,loops=0,sleeps=0;
+  int economy=1;
+  if(access(DIR "/legacy_pacing",F_OK)==0)economy=0;
+  web_set_economy(economy);
+  perf_sample previous=perf_take(now_sec(),0,0,0);
+  perf_rate rate={0}; double next_perf=previous.at+5;
+  log_line("pacing mode=%s",economy?"economy":"legacy");
   while (running && !control_stop_requested()) {
-    double now=now_sec();
+    double now=now_sec(); loops++;
+    int mode=web_get_economy();
+    if(mode!=economy){economy=mode; previous=perf_take(now,writes,loops,sleeps);rate=(perf_rate){0};next_perf=now+5;log_line("pacing mode=%s",economy?"economy":"legacy");}
     int failed=0,volume_failure=0;
     if (atomic_load(&src.fatal)) { result=1; break; }
     if (online && now-last_tick>0.25) { log_line("timing gap %.0fms; reopen USB",1000*(now-last_tick)); failed=1; }
@@ -87,6 +106,7 @@ int main(void) {
           else { for (unsigned i=0;i<ENG_BYTES;i++) packet[i]=0; }
           have=1;
         }
+        writes++;
         int w=solo_write(&solo,packet,sizeof(packet));
         if (w<0) { log_line("USB write failed errno=%d",errno); failed=1; break; }
         if (!w) {
@@ -111,7 +131,13 @@ int main(void) {
         ack=done; control_applied(done);
         log_line("volume verified: %.1f dB mute=%d",(done&255)*0.5-74.0,!!(done&TTGK_MUTE));
       }
-      if (!failed && !written) usleep(250);
+      if(!failed) {
+        unsigned delay=0;
+        if(blocked_since)delay=250;
+        else if(economy)delay=eng_pace_sleep(&pace,now_sec(),1);
+        else if(!written)delay=250;
+        if(delay){sleeps++;usleep(delay);}
+      }
     }
     if (online && failed) {
       control_disconnected(volume_failure);
@@ -121,8 +147,9 @@ int main(void) {
       eng_reset(&src.ring,&player); next_open=now_sec()+1; last_tick=now_sec();
     }
     now=now_sec();
+    if(now>=next_perf){perf_sample sample=perf_take(now,writes,loops,sleeps);rate=perf_diff(previous,sample);previous=sample;next_perf=now+5;}
     if (web_snapshot_requested()) {
-      web_audio s={online,source_active(&src),player.playing,online&&gate,online?solo_volume_raw(&solo):-1,(int)eng_fill(&src.ring),player.delta*1000000/ENG_Q,pace.queued,player.underruns,late_total+(online?pace.late:0),blocked_total+(online?pace.blocked:0),reconnects,atomic_load(&src.dropped)};
+      web_audio s={online,source_active(&src),player.playing,online&&gate,online?solo_volume_raw(&solo):-1,(int)eng_fill(&src.ring),player.delta*1000000/ENG_Q,pace.queued,player.underruns,late_total+(online?pace.late:0),blocked_total+(online?pace.blocked:0),reconnects,atomic_load(&src.dropped),player.skipped,writes,rate};
       web_publish(&s);
     }
     if (now>=next_stats) {
@@ -131,6 +158,7 @@ int main(void) {
         (unsigned long long)player.underruns,(unsigned long long)player.skipped,
         (unsigned long long)(late_total+(online?pace.late:0)),(unsigned long long)(blocked_total+(online?pace.blocked:0)),
         atomic_load(&src.dropped),atomic_load(&src.overruns),(unsigned long long)reconnects);
+      log_line("perf mode=%s cpu_valid=%d cpu_user=%.2f%% cpu_sys=%.2f%% write/s=%.1f loops/s=%.1f sleeps/s=%.1f",economy?"economy":"legacy",rate.valid,rate.user_pct,rate.sys_pct,rate.write_rate,rate.loop_rate,rate.sleep_rate);
       next_stats=now+30;
     }
     if (!online) usleep(50000);

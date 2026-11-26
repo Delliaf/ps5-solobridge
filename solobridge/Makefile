@@ -16,7 +16,7 @@ SRCS := main.c capture.c solo.c control.c source.c log.c probe.c web.c
 
 all: $(ELF)
 
-$(ELF): $(SRCS) capture.h solo.h control.h bridge_logic.h source.h engine.h log.h volume_logic.h probe.h probe_logic.h web.h web_page.h version.h notification.h
+$(ELF): $(SRCS) capture.h solo.h control.h bridge_logic.h source.h engine.h log.h volume_logic.h probe.h probe_logic.h web.h web_page.h version.h notification.h perf.h
 	$(CC) $(CFLAGS) -o $@ $(SRCS) $(LDADD)
 
 clean:

@@ -116,6 +116,7 @@ static void *volume_run(void *arg) {
 }
 void solo_request_volume(solo_t *s,int volume,int ready) {
   int v=volume|(ready?0:HOLD_MUTE);
+  if (atomic_load(&s->volume_wanted)==v) return;
   if (atomic_exchange(&s->volume_wanted,v)!=v && atomic_load(&s->event_ok))
     if (sem_post(&s->volume_event)<0) atomic_store(&s->event_ok,0);
 }

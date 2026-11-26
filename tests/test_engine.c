@@ -2,6 +2,7 @@
 #include <math.h>
 #include <stdio.h>
 #include "../solobridge/engine.h"
+#include "../solobridge/perf.h"
 static eng_ring r;
 static float samples[ENG_RING*2];
 int main(void) {
@@ -31,5 +32,20 @@ int main(void) {
   assert(!eng_pace_need(&q)); eng_pace_block(&q); assert(q.blocked==1 && q.queued==48);
   eng_pace_tick(&q,1.001); assert(q.queued>39.9 && q.queued<40.1);
   eng_pace_tick(&q,10); assert(q.queued==0 && q.late==1);
-  puts("engine tests passed");
+  eng_pace_init(&q,1.0); q.queued=48;
+  assert(eng_pace_sleep(&q,1.0,1)==1000);
+  assert(eng_pace_sleep(&q,1.0005,1)>=499 && eng_pace_sleep(&q,1.0005,1)<=501);
+  assert(eng_pace_sleep(&q,1.002,1)==0 && eng_pace_sleep(&q,1.002,0)==250);
+  /* Deterministic 60s nominal pacing simulation: no change in packet rate. */
+  eng_pace_init(&q,0); unsigned calls=0,writes=0;
+  double t=0;
+  while(t<60){eng_pace_tick(&q,t);while(eng_pace_need(&q)){eng_pace_write(&q);writes++;}
+    unsigned wait=eng_pace_sleep(&q,t,1);assert(wait>0&&wait<=1000);
+    calls++;t+=wait/1e6;}
+  assert(q.late==0 && writes>=479990 && writes<=480048 && calls<61000);
+  perf_sample a={.at=1,.user=1,.sys=2,.writes=100,.loops=20,.sleeps=10,.valid=1};
+  perf_sample z={.at=6,.user=1.1,.sys=2.2,.writes=40100,.loops=5020,.sleeps=5010,.valid=1};
+  perf_rate pfr=perf_diff(a,z);assert(pfr.valid&&fabs(pfr.user_pct-2)<1e-8&&fabs(pfr.sys_pct-4)<1e-8&&pfr.write_rate==8000&&pfr.loop_rate==1000);
+  z.valid=0;pfr=perf_diff(a,z);assert(!pfr.valid&&pfr.write_rate==8000);
+  puts("engine pacing and CPU accounting tests passed");
 }

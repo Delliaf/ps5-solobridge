@@ -29,7 +29,7 @@ try:
     req("GET","/api/status",False,403,{"Host":"attacker.example"})
     req("POST","/api/volume/128",True,403,{"Origin":"http://attacker.example"})
     s=json.loads(req("GET","/api/status",False))
-    assert s["hw"]==68 and s["version"]=="2.1.0" and s["fresh"]==1 and "pad" not in s
+    assert s["hw"]==68 and s["version"]=="2.2.0" and s["fresh"]==1 and "pad" not in s
     req("POST","/api/volume/108")
     assert json.loads(req("GET","/api/status",False))["desired"]==108
     req("POST","/api/volume/up")
@@ -40,6 +40,10 @@ try:
     req("GET","/api/volume/68",True,404)
     assert req("GET","/api/log",False)==b"test log\n"
     req("GET","/api/log/../../web_key",True,404)
+    req("POST","/api/pacing/legacy")
+    assert json.loads(req("GET","/api/status"))["economy"]==0
+    req("POST","/api/pacing/economy")
+    assert json.loads(req("GET","/api/status"))["economy"]==1
     req("POST","/api/notification/test")
     req("POST","/api/trace/on",True,404)
     with socket.create_connection(("127.0.0.1",port),timeout=2) as slow:

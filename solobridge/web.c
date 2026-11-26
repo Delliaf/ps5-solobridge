@@ -31,7 +31,9 @@
 #define WEB_STATUS ROOT "/web_status.txt"
 #define DISABLE ROOT "/disable_web"
 #define REQMAX 8192
-static atomic_int active,quit;
+static atomic_int active,quit,economy_mode=1;
+void web_set_economy(int on){atomic_store(&economy_mode,!!on);}
+int web_get_economy(void){return atomic_load(&economy_mode);}
 static pthread_t worker;
 static int started,listener=-1,wake[2]={-1,-1};
 static atomic_uint snapshot_request,snapshot_done;
@@ -126,9 +128,9 @@ static void status(int fd) {
   int fresh=atomic_load(&snapshot_done)==ticket;
   web_audio a; pthread_mutex_lock(&lock);a=audio;pthread_mutex_unlock(&lock);
   char b[2048];
-  int n=snprintf(b,sizeof(b),"{\"version\":\"%s\",\"pid\":%d,\"fresh\":%d,\"notification_result\":%d,\"usb\":%d,\"capture\":%d,\"playing\":%d,\"gate\":%d,\"hw\":%d,\"desired\":%d,\"verified\":%d,\"limit\":%d,\"online\":%d,\"ring\":%d,\"phase_ppm\":%d,\"queue\":%.2f,\"underruns\":%llu,\"late\":%llu,\"blocked\":%llu,\"reconnects\":%llu,\"source_drop\":%llu}",
+  int n=snprintf(b,sizeof(b),"{\"version\":\"%s\",\"pid\":%d,\"fresh\":%d,\"notification_result\":%d,\"usb\":%d,\"capture\":%d,\"playing\":%d,\"gate\":%d,\"hw\":%d,\"desired\":%d,\"verified\":%d,\"limit\":%d,\"online\":%d,\"ring\":%d,\"phase_ppm\":%d,\"queue\":%.2f,\"underruns\":%llu,\"late\":%llu,\"blocked\":%llu,\"reconnects\":%llu,\"source_drop\":%llu,\"skipped\":%llu,\"writes\":%llu,\"economy\":%d,\"cpu_valid\":%d,\"cpu_user\":%.3f,\"cpu_sys\":%.3f,\"write_rate\":%.1f,\"loop_rate\":%.1f,\"sleep_rate\":%.1f,\"perf_seconds\":%.3f}",
     TTGK_VERSION,getpid(),fresh,control_notification_result(),a.usb,a.capture,a.playing,a.gate,a.hw,control_volume(),control_verified(),control_limit(),control_online(),a.ring,a.phase,a.queue,
-    (unsigned long long)a.underruns,(unsigned long long)a.late,(unsigned long long)a.blocked,(unsigned long long)a.reconnects,(unsigned long long)a.source_drop);
+    (unsigned long long)a.underruns,(unsigned long long)a.late,(unsigned long long)a.blocked,(unsigned long long)a.reconnects,(unsigned long long)a.source_drop,(unsigned long long)a.skipped,(unsigned long long)a.writes,web_get_economy(),a.perf.valid,a.perf.user_pct,a.perf.sys_pct,a.perf.write_rate,a.perf.loop_rate,a.perf.sleep_rate,a.perf.seconds);
   if(n<0||(size_t)n>=sizeof(b))plain(fd,503,"status unavailable");else response(fd,200,"application/json",b,(size_t)n);
 }
 static void logs(int fd,const char *path,size_t max) {
@@ -187,6 +189,8 @@ static void serve(int fd) {
     int toggle=!strcmp(path,"/api/volume/toggle");
     if(!control_adjust(!strcmp(path,"/api/volume/up")?4:-4,toggle)){plain(fd,409,"DAC offline");return;}
     plain(fd,200,"requested; wait for readback");
+  } else if(!strcmp(path,"/api/pacing/economy")||!strcmp(path,"/api/pacing/legacy")){
+    web_set_economy(!strcmp(path,"/api/pacing/economy"));plain(fd,200,"pacing requested; compare after 5 seconds");
   } else if(!strcmp(path,"/api/notification/test")){
     if(control_test_notification())plain(fd,200,"notification queued; check console and logs");
     else plain(fd,503,"notification worker unavailable");
