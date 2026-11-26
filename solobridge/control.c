@@ -20,16 +20,21 @@
 #define REQUEST DIR "/volume.request"
 #define STOP DIR "/stop"
 #define ONLINE 1024
+static atomic_int pad_stage,pad_err,pad_handle=-1,pad_user=-1,pad_connected,pad_phase;
+static atomic_uint pad_buttons,pad_last_pressed,pad_changes,pad_reads;
+static atomic_uint_fast64_t pad_last_ms,pad_trace_until;
+static void pad_report(int stage,int err) { atomic_store(&pad_stage,stage); atomic_store(&pad_err,err); }
 #define MAX_FILE DIR "/max_volume"
 static int max_volume=136; /* -6 dB by default; 148 restores full range */
 static atomic_int desired=TTGK_DEFAULT,applied=-1,quitting=0,pad_ready=0;
 static int clamp_volume(int v) { return (v&255)>max_volume?(v&TTGK_MUTE)|max_volume:v; }
-static void request_volume(int v) {
+static int request_volume(int v) {
   int old=atomic_load(&desired);
   while (old&ONLINE) {
     int n=ONLINE|clamp_volume(v);
-    if (atomic_compare_exchange_weak(&desired,&old,n)) return;
+    if (atomic_compare_exchange_weak(&desired,&old,n)) return 1;
   }
+  return 0;
 }
 static pthread_t worker,pad_worker;
 static int started,pad_started;
@@ -68,9 +73,10 @@ static void *resolve(int m,const char *nid) {
 }
 static int pad_init(void) {
   /* Capture has already loaded libSceIpmi. */
-  if (load("libSceMbus")<0) return -1;
+  int m=load("libSceMbus");
+  if (m<0) { pad_report(2,m); return -1; }
   int u=load("libSceUserService"),p=load("libScePad");
-  if (u<0 || p<0) return -1;
+  if (u<0 || p<0) { pad_report(3,u<0?u:p); return -1; }
   user_init_fn ui=(user_init_fn)resolve(u,"j3YMu1MVNNo");
   get_user=(user_fn)resolve(u,"eNb53LQJmIM");
   init_fn pi=(init_fn)resolve(p,"hv1luiJrqQM");
@@ -78,11 +84,12 @@ static int pad_init(void) {
   open_pad=(open_fn)resolve(p,"xk0AcarP3V4");
   close_pad=(close_fn)resolve(p,"6ncge5+l5Qs");
   read_pad=(read_fn)resolve(p,"YndgXqQVV7c");
-  if (!ui||!get_user||!pi||!get_handle||!open_pad||!close_pad||!read_pad) return -1;
+  if (!ui||!get_user||!pi||!get_handle||!open_pad||!close_pad||!read_pad) { pad_report(4,-1); return -1; }
   int r=ui(NULL);
   if (r<0) log_line("pad: user init %#x",(unsigned)r);
   r=pi();
-  if (r<0) { log_line("pad: init %#x",(unsigned)r); return -1; }
+  if (r<0) { pad_report(5,r); log_line("pad: init %#x",(unsigned)r); return -1; }
+  pad_report(6,0);
   return 0;
 }
 static int read_value(const char *path,int *v) {
@@ -107,6 +114,10 @@ static int save_value(int v) {
   if (ok && rename(STATE ".tmp",STATE)==0) return 0;
   unlink(STATE ".tmp"); return -1;
 }
+void control_notify(const char *msg) {
+  notify_request req={0}; snprintf(req.message,sizeof(req.message),"%s",msg);
+  sceKernelSendNotificationRequest(0,&req,sizeof(req),0);
+}
 static void notify_volume(int v) {
   notify_request req={0};
   if (v&TTGK_MUTE) snprintf(req.message,sizeof(req.message),"TTGK USB Audio: muted");
@@ -116,6 +127,7 @@ static void notify_volume(int v) {
 static void *pad_run(void *arg) {
   (void)arg;
   int pad_ok=0, pad_attempted=access(DIR "/disable_pad",F_OK)==0;
+  pad_report(pad_attempted?1:0,0);
   if (pad_attempted) log_line("TTGK: DualSense disabled by file");
   int handle=-1,owned=0,user=-1;
   uint64_t retry=0,user_check=0;
@@ -128,31 +140,58 @@ static void *pad_run(void *arg) {
     }
     if (pad_ok && t>=user_check) {
       user_check=t+1000;
-      int new_user=-1; if (get_user(&new_user)<0) new_user=-1;
+      int new_user=-1; int ur=get_user(&new_user);
+      if (ur<0) new_user=-1;
+      atomic_store(&pad_user,new_user);
+      if (new_user==-1 || new_user==0) pad_report(6,ur);
       if (new_user!=user) {
         if (handle>=0 && owned) close_pad(handle);
         handle=-1; owned=0; user=new_user; retry=0; h=(hotkey_t){0}; released=0;
+        atomic_store(&pad_handle,-1); atomic_store(&pad_connected,0); atomic_store(&pad_buttons,0);
       }
     }
     if (pad_ok && handle<0 && user!=-1 && user!=0 && t>=retry) {
       retry=t+5000; handle=get_handle(user,0,0);
       if (handle<0) { handle=open_pad(user,0,0,NULL); owned=handle>=0; }
-      if (handle<0) log_line("TTGK: pad handle unavailable %#x",(unsigned)handle);
-      else log_line("TTGK: pad handle ready");
+      atomic_store(&pad_handle,handle);
+      if (handle<0) { pad_report(7,handle); log_line("TTGK: pad handle unavailable %#x",(unsigned)handle); }
+      else { pad_report(8,0); log_line("TTGK: pad handle ready"); }
     }
     if (!(atomic_load(&desired)&ONLINE)) { h=(hotkey_t){0}; released=0; }
     if (handle>=0) {
       union { pad_data d; uint64_t align; uint8_t storage[512]; } state={0};
       int r=read_pad(handle,&state);
-      if (r<0 || !state.d.connected) {
+      atomic_fetch_add(&pad_reads,1);
+      atomic_store(&pad_last_ms,t);
+      if (r!=0 || !state.d.connected) {
+        pad_report(r!=0?9:10,r);
+        atomic_store(&pad_connected,0); atomic_store(&pad_buttons,0);
         if (owned) close_pad(handle);
         handle=-1; owned=0; retry=t+1000; h=(hotkey_t){0}; released=0;
+        atomic_store(&pad_handle,-1);
       } else {
         uint32_t b=state.d.buttons;
-        if ((b&PAD_MOD)!=PAD_MOD) released=1;
-        int state=atomic_load(&desired);
-        if (released && (state&ONLINE)) request_volume(hotkey(&h,b,t,state&511));
+        atomic_store(&pad_connected,1);
+        pad_report((b&0x80000000u)?11:12,0);
+        uint32_t old=atomic_exchange(&pad_buttons,b);
+        if (old!=b) {
+          atomic_fetch_add(&pad_changes,1);
+          uint32_t pressed=b&~old&0x7fffffffu;
+          if (pressed) atomic_store(&pad_last_pressed,pressed);
+          if (t<atomic_load(&pad_trace_until))
+            log_line("pad trace: buttons=%08x pressed=%08x phase=%d",b,pressed,h.phase);
+        }
+        if (b&0x80000000u) { h=(hotkey_t){0}; released=0; }
+        else {
+          if ((b&PAD_MOD)!=PAD_MOD) released=1;
+          int state=atomic_load(&desired);
+          if (released && (state&ONLINE)) {
+            int v=hotkey(&h,b,t,state&511);
+            if (v!=(state&511)) request_volume(v);
+          }
+        }
       }
+      atomic_store(&pad_phase,h.phase);
     }
     usleep(40000);
   }
@@ -204,8 +243,17 @@ int control_start(void) {
   if (access(DIR "/disable_pad",F_OK)!=0) {
     if (!pthread_create(&pad_worker,NULL,pad_run,NULL)) pad_started=1;
     else log_line("TTGK: pad worker failed; file controls remain available");
-  } else log_line("TTGK: DualSense disabled by file");
+  } else { pad_report(1,0); log_line("TTGK: DualSense disabled by file"); }
   return 0;
+}
+int control_set(int v) { return volume_valid(v)?request_volume(v):0; }
+int control_limit(void) { return max_volume; }
+int control_verified(void) { return atomic_load(&applied); }
+int control_online(void) { return !!(atomic_load(&desired)&ONLINE); }
+void control_request_stop(void) { atomic_store(&quitting,1); }
+void control_pad_trace(int on) { atomic_store(&pad_trace_until,on?ms()+60000:0); }
+void control_pad_snapshot(pad_snapshot *s) {
+  *s=(pad_snapshot){atomic_load(&pad_stage),atomic_load(&pad_err),atomic_load(&pad_handle),atomic_load(&pad_user),atomic_load(&pad_connected),atomic_load(&pad_phase),atomic_load(&pad_buttons),atomic_load(&pad_last_pressed),atomic_load(&pad_changes),atomic_load(&pad_reads),atomic_load(&pad_last_ms)};
 }
 void control_enable_pad(void) { atomic_store(&pad_ready,1); }
 int control_volume(void) { return atomic_load(&desired)&511; }

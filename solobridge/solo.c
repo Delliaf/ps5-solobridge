@@ -120,6 +120,7 @@ void solo_request_volume(solo_t *s,int volume,int ready) {
   if (atomic_exchange(&s->volume_wanted,v)!=v && atomic_load(&s->event_ok))
     if (sem_post(&s->volume_event)<0) atomic_store(&s->event_ok,0);
 }
+int solo_volume_raw(solo_t *s) { return atomic_load(&s->volume_done); }
 int solo_volume_done(solo_t *s) {
   int v=atomic_load(&s->volume_done);
   return v<0 || (v&HOLD_MUTE)?-1:v;

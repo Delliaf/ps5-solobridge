@@ -72,3 +72,7 @@ Volume requests normally wake the hardware worker using a POSIX semaphore (timed
 ## TV Tempest and native DualSense room measurement (experimental verification)
 
 See [TV_TEMPEST.md](docs/TV_TEMPEST.md) for the actual native setup and opt-in A/B and calibration signal capture. This is diagnostic support only: the source is still AVCAP Remote Play, and native TV Tempest/measurement propagation through it is not confirmed. No microphone capture, fake surround, kernel patches or additional network services. Disabled by default.
+
+## Local web diagnostic panel
+
+Enabled by default at http://PS5-IP:9160/ on private IPv4 networks. A fresh 16-character hex key is generated on each launch, shown in a PS5 notification and stored in /data/solobridge/web_key. HTTP is not encrypted: use only a trusted LAN; do not forward the port. Volume requests are acknowledged separately from hardware readback. The panel shows capture, USB, buffer, hardware gate, actual pad reads, raw errors, last pressed mask and a 60-second opt-in button trace. Logs can be copied or downloaded. Disable web until restart, or persist via /data/solobridge/disable_web; remove that file before launch to restore. Disabling closes the listening socket and ends the worker, not playback. Stop payload is separate. No mic recording. The native pad API can still be denied on firmware 13.00.

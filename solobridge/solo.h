@@ -22,6 +22,7 @@ typedef struct {
 int solo_open(solo_t *s,int verbose,int volume);
 void solo_request_volume(solo_t *s,int volume,int ready);
 int solo_volume_done(solo_t *s);
+int solo_volume_raw(solo_t *s);
 int solo_volume_error(solo_t *s);
 int solo_write(solo_t *s,const void *pkt,size_t len);
 void solo_close(solo_t *s);
